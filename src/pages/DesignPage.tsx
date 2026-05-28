@@ -92,12 +92,19 @@ const SAVED_DESIGN_KEY = "sam-bubble-studio-last-design";
 
 const FONT_OPTIONS = [
   { label: "Mặc định", value: "inherit" },
-  { label: "Sans hiện đại", value: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" },
+  {
+    label: "Sans hiện đại",
+    value:
+      "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+  },
   { label: "Arial", value: "Arial, Helvetica, sans-serif" },
   { label: "Serif sang", value: "Georgia, 'Times New Roman', serif" },
   { label: "Cormorant", value: "'Cormorant Garamond', Georgia, serif" },
   { label: "Josefin", value: "'Josefin Sans', Arial, sans-serif" },
-  { label: "Mono", value: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" },
+  {
+    label: "Mono",
+    value: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+  },
 ] as const;
 
 function getLayerFontFamily(layer?: DesignLayer) {
@@ -189,6 +196,9 @@ export default function DesignPage() {
   const layerResizeRef = useRef<LayerResizeState | null>(null);
   const backgroundGestureRef = useRef<BackgroundGesture | null>(null);
   const layerDragRef = useRef(false);
+  const layerDragPositionRef = useRef<Record<string, { x: number; y: number }>>(
+    {},
+  );
   const inlineEditorRefs = useRef<Record<string, HTMLTextAreaElement | null>>(
     {},
   );
@@ -202,6 +212,9 @@ export default function DesignPage() {
     y: 0,
     scale: 1,
   });
+
+  const [freeEditScale, setFreeEditScale] = useState(1);
+  const freeEditScaleRef = useRef(1);
 
   const [canvasRatioId, setCanvasRatioId] = useState<CanvasRatioId>("9:16");
   const [imageFit, setImageFit] = useState<ImageFit>("contain");
@@ -284,14 +297,19 @@ export default function DesignPage() {
           ),
     );
     setSelectedLayerId(saved.selectedLayerId ?? "brand");
-    setSelectedLayerIds(saved.selectedLayerId ? [saved.selectedLayerId] : ["brand"]);
+    setSelectedLayerIds(
+      saved.selectedLayerId ? [saved.selectedLayerId] : ["brand"],
+    );
     setBubbleBox(saved.bubbleBox ?? activeTemplate.defaultBox);
     setParentEditBaseBox(saved.parentEditBaseBox ?? null);
   }, []);
 
   const selectedLayer = layers.find((item) => item.id === selectedLayerId);
   const selectedLayerFontFamily = getLayerFontFamily(selectedLayer);
-  const canDeleteSelectedLayers = freeEdit && selectedLayerIds.length > 0 && layers.length > selectedLayerIds.length;
+  const canDeleteSelectedLayers =
+    freeEdit &&
+    selectedLayerIds.length > 0 &&
+    layers.length > selectedLayerIds.length;
   const editingLayer = layers.find((item) => item.id === editingLayerId);
   const selectedGroupLayers = layers.filter((item) =>
     selectedLayerIds.includes(item.id),
@@ -650,7 +668,9 @@ export default function DesignPage() {
     if (nextLayers.length === layers.length) return;
 
     if (nextLayers.length === 0) {
-      alert("Không thể xóa hết toàn bộ element. Cần giữ lại ít nhất 1 element.");
+      alert(
+        "Không thể xóa hết toàn bộ element. Cần giữ lại ít nhất 1 element.",
+      );
       return;
     }
 
@@ -730,7 +750,6 @@ export default function DesignPage() {
     if (backgroundEditMode) return;
 
     const pinch = bubblePinchRef.current;
-
     if (!pinch || event.touches.length !== 2) return;
 
     event.preventDefault();
@@ -741,19 +760,49 @@ export default function DesignPage() {
 
     const scale = currentDistance / pinch.startDistance;
 
-    setBubbleBox((prev) => ({
-      ...prev,
-      width: Math.max(170, Math.round(pinch.startWidth * scale)),
-      height: Math.max(160, Math.round(pinch.startHeight * scale)),
-    }));
+    if (freeEdit) {
+      // Trong freeEdit: scale toàn bộ wrapper div thay vì từng layer
+      const nextScale = Math.max(0.3, Math.min(3, scale));
+      freeEditScaleRef.current = nextScale;
+      setFreeEditScale(nextScale);
+    } else {
+      setBubbleBox((prev) => ({
+        ...prev,
+        width: Math.max(170, Math.round(pinch.startWidth * scale)),
+        height: Math.max(160, Math.round(pinch.startHeight * scale)),
+      }));
+    }
   }
-
   function handleBubbleTouchEnd(event: React.TouchEvent<HTMLDivElement>) {
     if (event.touches.length < 2) {
+      // Commit scale vào tọa độ thực của từng layer rồi reset scale về 1
+      if (freeEdit && freeEditScaleRef.current !== 1) {
+        const s = freeEditScaleRef.current;
+        setLayers((prev) =>
+          prev.map((layer) => ({
+            ...layer,
+            x: Math.round(layer.x * s),
+            y: Math.round(layer.y * s),
+            width: Math.max(8, Math.round(layer.width * s)),
+            height: Math.max(8, Math.round(layer.height * s)),
+            fontSize: layer.fontSize
+              ? Math.max(6, Math.round(layer.fontSize * s))
+              : layer.fontSize,
+            padding: layer.padding
+              ? Math.max(0, Math.round(layer.padding * s))
+              : layer.padding,
+            borderRadius: layer.borderRadius
+              ? Math.max(0, Math.round(layer.borderRadius * s))
+              : layer.borderRadius,
+          })),
+        );
+        freeEditScaleRef.current = 1;
+        setFreeEditScale(1);
+      }
+
       bubblePinchRef.current = null;
     }
   }
-
   function handleLayerTouchStart(
     event: React.TouchEvent<HTMLDivElement>,
     layer: DesignLayer,
@@ -968,7 +1017,11 @@ export default function DesignPage() {
         contentScale,
         0,
       ),
-      borderWidth: scaleOptionalPixelValue(startLayer.borderWidth, contentScale, 0),
+      borderWidth: scaleOptionalPixelValue(
+        startLayer.borderWidth,
+        contentScale,
+        0,
+      ),
       letterSpacing:
         typeof startLayer.letterSpacing === "number"
           ? Number((startLayer.letterSpacing * contentScale).toFixed(2))
@@ -1663,168 +1716,228 @@ export default function DesignPage() {
       )}
 
       {freeEdit ? (
-        [...layers]
-          .sort((a, b) => (a.zIndex ?? 1) - (b.zIndex ?? 1))
-          .map((layer) => {
-            const selected = selectedLayerIds.includes(layer.id);
-            const canEditText = layer.type !== "box";
-            const isInlineEditing =
-              canEditText &&
-              selected &&
-              editingLayerId === layer.id &&
-              !exportMode;
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            transform: `scale(${freeEditScale})`,
+            transformOrigin: "top left",
+            pointerEvents: backgroundEditMode ? "none" : "auto",
+          }}
+        >
+          {[...layers]
+            .sort((a, b) => (a.zIndex ?? 1) - (b.zIndex ?? 1))
+            .map((layer) => {
+              const selected = selectedLayerIds.includes(layer.id);
+              const canEditText = layer.type !== "box";
+              const isInlineEditing =
+                canEditText &&
+                selected &&
+                editingLayerId === layer.id &&
+                !exportMode;
 
-            return (
-              <Rnd
-                key={layer.id}
-                bounds="parent"
-                size={{
-                  width: layer.width,
-                  height: layer.height,
-                }}
-                position={{
-                  x: layer.x,
-                  y: layer.y,
-                }}
-                onMouseDown={() => handleLayerPointerDown(layer)}
-                onPointerDown={() => handleLayerPointerDown(layer)}
-                onDoubleClick={(event: React.MouseEvent<HTMLDivElement>) =>
-                  handleLayerDoubleClick(event, layer)
-                }
-                onTouchStart={(event: any) => {
-                  if (editingLayerId && editingLayerId !== layer.id) {
-                    handleLayerPointerDown(layer);
-                    return;
+              return (
+                <Rnd
+                  key={layer.id}
+                  bounds={freeEditScale === 1 ? "parent" : undefined}
+                  size={{
+                    width: layer.width,
+                    height: layer.height,
+                  }}
+                  position={{
+                    x: layer.x,
+                    y: layer.y,
+                  }}
+                  onMouseDown={() => handleLayerPointerDown(layer)}
+                  onPointerDown={() => handleLayerPointerDown(layer)}
+                  onDoubleClick={(event: React.MouseEvent<HTMLDivElement>) =>
+                    handleLayerDoubleClick(event, layer)
                   }
+                  onTouchStart={(event: any) => {
+                    if (editingLayerId && editingLayerId !== layer.id) {
+                      handleLayerPointerDown(layer);
+                      return;
+                    }
+                    handleLayerTouchStart(event, layer);
+                  }}
+                  onTouchMove={(event: any) =>
+                    handleLayerTouchMove(event, layer)
+                  }
+                  onTouchEnd={handleLayerTouchEnd}
+                  onTouchCancel={handleLayerTouchEnd}
+                  onDragStart={() => {
+                    layerDragRef.current = true;
+                    setEditingLayerId(null);
+                    selectSingleLayer(layer.id);
+                  }}
+                  onDrag={(_, data) => {
+                    layerDragPositionRef.current[layer.id] = {
+                      x: data.x,
+                      y: data.y,
+                    };
+                  }}
+                  onDragStop={(_, data) => {
+                    updateLayer({
+                      ...layer,
+                      x: data.x,
+                      y: data.y,
+                    });
+                    window.setTimeout(() => {
+                      layerDragRef.current = false;
+                    }, 80);
+                  }}
+                  onResizeStart={() => {
+                    setEditingLayerId(null);
+                    selectSingleLayer(layer.id);
+                    layerResizeRef.current = {
+                      layerId: layer.id,
+                      startLayer: layer,
+                    };
+                  }}
+                  onResize={(_, __, ref, ___, position) => {
+                    const resizeState = layerResizeRef.current;
+                    const baseLayer =
+                      resizeState?.layerId === layer.id
+                        ? resizeState.startLayer
+                        : layer;
 
-                  handleLayerTouchStart(event, layer);
-                }}
-                onTouchMove={(event: any) => handleLayerTouchMove(event, layer)}
-                onTouchEnd={handleLayerTouchEnd}
-                onTouchCancel={handleLayerTouchEnd}
-                onDragStart={() => {
-                  layerDragRef.current = true;
-                  setEditingLayerId(null);
-                  selectSingleLayer(layer.id);
-                }}
-                onDrag={(_, data) =>
-                  updateLayer({
-                    ...layer,
-                    x: data.x,
-                    y: data.y,
-                  })
-                }
-                onDragStop={(_, data) => {
-                  updateLayer({
-                    ...layer,
-                    x: data.x,
-                    y: data.y,
-                  });
+                    updateLayer(
+                      scaleLayerFromResize(
+                        baseLayer,
+                        readPixelValue(ref.style.width),
+                        readPixelValue(ref.style.height),
+                        position,
+                      ),
+                    );
+                  }}
+                  onResizeStop={(_, __, ref, ___, position) => {
+                    const resizeState = layerResizeRef.current;
+                    const baseLayer =
+                      resizeState?.layerId === layer.id
+                        ? resizeState.startLayer
+                        : layer;
 
-                  window.setTimeout(() => {
-                    layerDragRef.current = false;
-                  }, 80);
-                }}
-                onResizeStart={() => {
-                  setEditingLayerId(null);
-                  selectSingleLayer(layer.id);
-                  layerResizeRef.current = {
-                    layerId: layer.id,
-                    startLayer: layer,
-                  };
-                }}
-                onResize={(_, __, ref, ___, position) => {
-                  const resizeState = layerResizeRef.current;
-                  const baseLayer =
-                    resizeState?.layerId === layer.id
-                      ? resizeState.startLayer
-                      : layer;
+                    updateLayer(
+                      scaleLayerFromResize(
+                        baseLayer,
+                        readPixelValue(ref.style.width),
+                        readPixelValue(ref.style.height),
+                        position,
+                      ),
+                    );
+                    layerResizeRef.current = null;
+                  }}
+                  minWidth={28}
+                  minHeight={14}
+                  enableUserSelectHack={true}
+                  disableDragging={
+                    backgroundEditMode ||
+                    pinchingLayerId === layer.id ||
+                    isInlineEditing
+                  }
+                  className="select-none"
+                  data-design-layer="true"
+                  style={{
+                    zIndex: layer.zIndex ?? 1,
+                    touchAction: "none",
+                    WebkitUserSelect: "none",
+                    userSelect: "none",
+                    pointerEvents: backgroundEditMode ? "none" : "auto",
+                    overflow: exportMode ? "visible" : undefined,
+                    fontFamily: getLayerFontFamily(layer),
+                  }}
+                  enableResizing={
+                    selected && !backgroundEditMode && !isInlineEditing
+                      ? {
+                          top: true,
+                          right: true,
+                          bottom: true,
+                          left: true,
+                          topLeft: true,
+                          topRight: true,
+                          bottomLeft: true,
+                          bottomRight: true,
+                        }
+                      : false
+                  }
+                  resizeHandleStyles={getDashedResizeHandleStyles(
+                    selected && !isInlineEditing,
+                  )}
+                  cancel=".inline-layer-text-editor,.inline-layer-edit-done"
+                >
+                  {isInlineEditing ? (
+                    <InlineLayerTextEditor
+                      layer={layer}
+                      value={getLayerTextValue(layer)}
+                      inputRef={(element) => {
+                        inlineEditorRefs.current[layer.id] = element;
+                      }}
+                      onChange={(value) => updateLayerText(layer, value)}
+                      onDone={stopInlineTextEdit}
+                    />
+                  ) : (
+                    <SafeLayerRenderer
+                      layer={layer}
+                      selected={selected}
+                      exportMode={exportMode}
+                      showFrame={showLayerFrames}
+                      onClick={() => handleLayerPointerDown(layer)}
+                    />
+                  )}
+                </Rnd>
+              );
+            })}
 
-                  updateLayer(
-                    scaleLayerFromResize(
-                      baseLayer,
-                      readPixelValue(ref.style.width),
-                      readPixelValue(ref.style.height),
-                      position,
-                    ),
-                  );
-                }}
-                onResizeStop={(_, __, ref, ___, position) => {
-                  const resizeState = layerResizeRef.current;
-                  const baseLayer =
-                    resizeState?.layerId === layer.id
-                      ? resizeState.startLayer
-                      : layer;
+          {freeEdit && selectedGroupBox && !exportMode && !editingLayerId && (
+            <Rnd
+              bounds="parent"
+              position={{ x: selectedGroupBox.x, y: selectedGroupBox.y }}
+              size={{
+                width: selectedGroupBox.width,
+                height: selectedGroupBox.height,
+              }}
+              enableResizing={false}
+              enableUserSelectHack={true}
+              onDragStart={(_, data) => startGroupDrag(data)}
+              onDrag={(_, data) => moveSelectedGroup(data)}
+              onDragStop={(_, data) => {
+                moveSelectedGroup(data);
+                stopGroupDrag();
+              }}
+              className="select-none"
+              data-export-hidden="true"
+              style={{
+                zIndex: 999,
+                touchAction: "none",
+                border: "2px dashed rgba(168,85,247,0.95)",
+                boxShadow: "0 0 0 3px rgba(168,85,247,0.22)",
+                background: "rgba(168,85,247,0.04)",
+                cursor: "move",
+              }}
+            >
+              <div className="pointer-events-none absolute -top-7 left-0 rounded-full bg-purple-500 px-2 py-1 text-[11px] font-black leading-none text-white shadow-lg">
+                Đã chọn {selectedLayerIds.length} element · kéo để di chuyển
+                nhóm
+              </div>
+            </Rnd>
+          )}
 
-                  updateLayer(
-                    scaleLayerFromResize(
-                      baseLayer,
-                      readPixelValue(ref.style.width),
-                      readPixelValue(ref.style.height),
-                      position,
-                    ),
-                  );
-
-                  layerResizeRef.current = null;
-                }}
-                minWidth={28}
-                minHeight={14}
-                enableUserSelectHack={false}
-                disableDragging={
-                  backgroundEditMode ||
-                  pinchingLayerId === layer.id ||
-                  isInlineEditing
-                }
-                className="select-none"
-                data-design-layer="true"
-                style={{
-                  zIndex: layer.zIndex ?? 1,
-                  touchAction: isInlineEditing ? "auto" : "none",
-                  pointerEvents: backgroundEditMode ? "none" : "auto",
-                  overflow: exportMode ? "visible" : undefined,
-                  fontFamily: getLayerFontFamily(layer),
-                }}
-                enableResizing={
-                  selected && !backgroundEditMode && !isInlineEditing
-                    ? {
-                        top: true,
-                        right: true,
-                        bottom: true,
-                        left: true,
-                        topLeft: true,
-                        topRight: true,
-                        bottomLeft: true,
-                        bottomRight: true,
-                      }
-                    : false
-                }
-                resizeHandleStyles={getDashedResizeHandleStyles(
-                  selected && !isInlineEditing,
-                )}
-                cancel=".inline-layer-text-editor,.inline-layer-edit-done"
-              >
-                {isInlineEditing ? (
-                  <InlineLayerTextEditor
-                    layer={layer}
-                    value={getLayerTextValue(layer)}
-                    inputRef={(element) => {
-                      inlineEditorRefs.current[layer.id] = element;
-                    }}
-                    onChange={(value) => updateLayerText(layer, value)}
-                    onDone={stopInlineTextEdit}
-                  />
-                ) : (
-                  <SafeLayerRenderer
-                    layer={layer}
-                    selected={selected}
-                    exportMode={exportMode}
-                    showFrame={showLayerFrames}
-                    onClick={() => handleLayerPointerDown(layer)}
-                  />
-                )}
-              </Rnd>
-            );
-          })
+          {marqueeBox && !exportMode && (
+            <div
+              data-export-hidden="true"
+              className="pointer-events-none absolute z-[1000]"
+              style={{
+                left: marqueeBox.x,
+                top: marqueeBox.y,
+                width: marqueeBox.width,
+                height: marqueeBox.height,
+                border: "2px dashed rgba(14,165,233,0.95)",
+                background: "rgba(14,165,233,0.12)",
+                boxShadow: "0 0 0 1px rgba(255,255,255,0.85) inset",
+              }}
+            />
+          )}
+        </div>
       ) : (
         <Rnd
           bounds="parent"
@@ -1873,7 +1986,7 @@ export default function DesignPage() {
           minWidth={parentBubbleMinWidth}
           minHeight={parentBubbleMinHeight}
           lockAspectRatio={parentBubbleAspectRatio}
-          enableUserSelectHack={false}
+          enableUserSelectHack={true}
           className="select-none"
           style={{
             touchAction: "none",
@@ -1939,55 +2052,6 @@ export default function DesignPage() {
               })}
           </div>
         </Rnd>
-      )}
-
-      {freeEdit && selectedGroupBox && !exportMode && !editingLayerId && (
-        <Rnd
-          bounds="parent"
-          position={{ x: selectedGroupBox.x, y: selectedGroupBox.y }}
-          size={{
-            width: selectedGroupBox.width,
-            height: selectedGroupBox.height,
-          }}
-          enableResizing={false}
-          enableUserSelectHack={false}
-          onDragStart={(_, data) => startGroupDrag(data)}
-          onDrag={(_, data) => moveSelectedGroup(data)}
-          onDragStop={(_, data) => {
-            moveSelectedGroup(data);
-            stopGroupDrag();
-          }}
-          className="select-none"
-          data-export-hidden="true"
-          style={{
-            zIndex: 999,
-            touchAction: "none",
-            border: "2px dashed rgba(168,85,247,0.95)",
-            boxShadow: "0 0 0 3px rgba(168,85,247,0.22)",
-            background: "rgba(168,85,247,0.04)",
-            cursor: "move",
-          }}
-        >
-          <div className="pointer-events-none absolute -top-7 left-0 rounded-full bg-purple-500 px-2 py-1 text-[11px] font-black leading-none text-white shadow-lg">
-            Đã chọn {selectedLayerIds.length} element · kéo để di chuyển nhóm
-          </div>
-        </Rnd>
-      )}
-
-      {marqueeBox && !exportMode && (
-        <div
-          data-export-hidden="true"
-          className="pointer-events-none absolute z-[1000]"
-          style={{
-            left: marqueeBox.x,
-            top: marqueeBox.y,
-            width: marqueeBox.width,
-            height: marqueeBox.height,
-            border: "2px dashed rgba(14,165,233,0.95)",
-            background: "rgba(14,165,233,0.12)",
-            boxShadow: "0 0 0 1px rgba(255,255,255,0.85) inset",
-          }}
-        />
       )}
     </div>
   );
@@ -2158,7 +2222,9 @@ export default function DesignPage() {
 
           <select
             value={selectedLayerFontFamily}
-            disabled={!freeEdit || !selectedLayer || selectedLayer.type === "box"}
+            disabled={
+              !freeEdit || !selectedLayer || selectedLayer.type === "box"
+            }
             onChange={(event) => updateSelectedLayerFont(event.target.value)}
             className="shrink-0 rounded-2xl bg-zinc-100 px-3 py-3 text-xs font-bold outline-none disabled:opacity-40"
             aria-label="Đổi font chữ"
@@ -2282,13 +2348,19 @@ export default function DesignPage() {
 
             <select
               value={selectedLayerFontFamily}
-              disabled={!freeEdit || !selectedLayer || selectedLayer.type === "box"}
+              disabled={
+                !freeEdit || !selectedLayer || selectedLayer.type === "box"
+              }
               onChange={(event) => updateSelectedLayerFont(event.target.value)}
               className="shrink-0 rounded-xl bg-white/10 px-3 py-3 text-white outline-none disabled:opacity-40"
               aria-label="Đổi font chữ"
             >
               {FONT_OPTIONS.map((font) => (
-                <option key={font.value} value={font.value} className="text-black">
+                <option
+                  key={font.value}
+                  value={font.value}
+                  className="text-black"
+                >
                   {font.label}
                 </option>
               ))}
@@ -2553,7 +2625,6 @@ export default function DesignPage() {
   );
 }
 
-
 function isSingleLineTextLayer(layer: DesignLayer) {
   if (layer.type === "box" || layer.type === "service-list") return false;
 
@@ -2703,6 +2774,8 @@ function InlineLayerTextEditor({
         }}
         style={{
           color: layer.color ?? "inherit",
+          touchAction: "auto",
+          userSelect: "text",
           fontSize: layer.fontSize,
           fontWeight: layer.fontWeight,
           textAlign: layer.textAlign ?? "left",
@@ -2976,7 +3049,10 @@ function FreeEditTools({
             <button
               type="button"
               onClick={onDeleteSelectedLayers}
-              disabled={selectedLayerIds.length === 0 || selectedLayerIds.length >= layers.length}
+              disabled={
+                selectedLayerIds.length === 0 ||
+                selectedLayerIds.length >= layers.length
+              }
               className="flex items-center justify-center gap-2 rounded-xl bg-rose-50 px-3 py-3 text-xs font-bold text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Trash2 size={15} /> Xóa
@@ -2998,7 +3074,8 @@ function FreeEditTools({
               ))}
             </select>
             <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
-              Chọn một hoặc quét nhiều element chữ rồi đổi font, chữ sẽ đổi ngay.
+              Chọn một hoặc quét nhiều element chữ rồi đổi font, chữ sẽ đổi
+              ngay.
             </p>
           </div>
 

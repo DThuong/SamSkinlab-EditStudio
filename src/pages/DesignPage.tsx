@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Rnd } from "react-rnd";
 import { toBlob } from "html-to-image";
-import { ImagePlus, Menu, Plus, Type, X } from "lucide-react";
+import { ImagePlus, Menu, Plus, Trash2, Type, X } from "lucide-react";
 import BubbleRenderer from "../components/BubbleRenderer";
 import EditorControls from "../components/EditorControls";
 import TemplatePicker from "../components/TemplatePicker";
@@ -89,6 +89,23 @@ const ratioOptions: {
 const MIN_IMAGE_SCALE = 0.3;
 const MAX_IMAGE_SCALE = 5;
 const SAVED_DESIGN_KEY = "sam-bubble-studio-last-design";
+
+const FONT_OPTIONS = [
+  { label: "Mặc định", value: "inherit" },
+  { label: "Sans hiện đại", value: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" },
+  { label: "Arial", value: "Arial, Helvetica, sans-serif" },
+  { label: "Serif sang", value: "Georgia, 'Times New Roman', serif" },
+  { label: "Cormorant", value: "'Cormorant Garamond', Georgia, serif" },
+  { label: "Josefin", value: "'Josefin Sans', Arial, sans-serif" },
+  { label: "Mono", value: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" },
+] as const;
+
+function getLayerFontFamily(layer?: DesignLayer) {
+  if (!layer || layer.type === "box") return "inherit";
+
+  const value = (layer as DesignLayer & { fontFamily?: string }).fontFamily;
+  return typeof value === "string" && value.trim() ? value : "inherit";
+}
 
 type SavedDesignState = {
   imageUrl: string;
@@ -267,11 +284,14 @@ export default function DesignPage() {
           ),
     );
     setSelectedLayerId(saved.selectedLayerId ?? "brand");
+    setSelectedLayerIds(saved.selectedLayerId ? [saved.selectedLayerId] : ["brand"]);
     setBubbleBox(saved.bubbleBox ?? activeTemplate.defaultBox);
     setParentEditBaseBox(saved.parentEditBaseBox ?? null);
   }, []);
 
   const selectedLayer = layers.find((item) => item.id === selectedLayerId);
+  const selectedLayerFontFamily = getLayerFontFamily(selectedLayer);
+  const canDeleteSelectedLayers = freeEdit && selectedLayerIds.length > 0 && layers.length > selectedLayerIds.length;
   const editingLayer = layers.find((item) => item.id === editingLayerId);
   const selectedGroupLayers = layers.filter((item) =>
     selectedLayerIds.includes(item.id),
@@ -423,6 +443,18 @@ export default function DesignPage() {
     };
   }
 
+  async function waitForFonts() {
+    const fonts = document.fonts;
+
+    if (!fonts?.ready) return;
+
+    try {
+      await fonts.ready;
+    } catch (error) {
+      console.warn("Font ready check failed:", error);
+    }
+  }
+
   function handleImageUpload(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -534,7 +566,8 @@ export default function DesignPage() {
         textAlign: "center",
         lineHeight: 1.15,
         padding: 4,
-      },
+        fontFamily: "inherit",
+      } as DesignLayer & { fontFamily: string },
     ]);
 
     setSelectedLayerId(id);
@@ -601,6 +634,52 @@ export default function DesignPage() {
       setSelectedLayerId(fallback.id);
       setSelectedLayerIds([fallback.id]);
     }
+
+    if (editingLayerId === id) {
+      setEditingLayerId(null);
+      setMobileTextEditorOpen(false);
+    }
+  }
+
+  function deleteSelectedLayers() {
+    if (!freeEdit || selectedLayerIds.length === 0) return;
+
+    const deleteSet = new Set(selectedLayerIds);
+    const nextLayers = layers.filter((layer) => !deleteSet.has(layer.id));
+
+    if (nextLayers.length === layers.length) return;
+
+    if (nextLayers.length === 0) {
+      alert("Không thể xóa hết toàn bộ element. Cần giữ lại ít nhất 1 element.");
+      return;
+    }
+
+    const nextSelectedId = nextLayers[0]?.id ?? "";
+    setLayers(nextLayers);
+    setSelectedLayerId(nextSelectedId);
+    setSelectedLayerIds(nextSelectedId ? [nextSelectedId] : []);
+
+    if (editingLayerId && deleteSet.has(editingLayerId)) {
+      setEditingLayerId(null);
+      setMobileTextEditorOpen(false);
+    }
+  }
+
+  function updateSelectedLayerFont(fontFamily: string) {
+    if (!freeEdit || selectedLayerIds.length === 0) return;
+
+    const selectedSet = new Set(selectedLayerIds);
+
+    setLayers((prev) =>
+      prev.map((layer) => {
+        if (!selectedSet.has(layer.id) || layer.type === "box") return layer;
+
+        return {
+          ...layer,
+          fontFamily,
+        } as DesignLayer & { fontFamily: string };
+      }),
+    );
   }
 
   function bringForward(id: string) {
@@ -1354,7 +1433,6 @@ export default function DesignPage() {
       cacheBust: true,
       pixelRatio,
       backgroundColor: "rgba(255,255,255,0)",
-      fontEmbedCSS: "",
       filter: (targetNode) => {
         if (targetNode instanceof HTMLElement) {
           return (
@@ -1449,6 +1527,7 @@ export default function DesignPage() {
       });
 
       const node = captureRef.current;
+      await waitForFonts();
       await waitForImages(node);
 
       const currentWidth = node.getBoundingClientRect().width;
@@ -1702,6 +1781,8 @@ export default function DesignPage() {
                   zIndex: layer.zIndex ?? 1,
                   touchAction: isInlineEditing ? "auto" : "none",
                   pointerEvents: backgroundEditMode ? "none" : "auto",
+                  overflow: exportMode ? "visible" : undefined,
+                  fontFamily: getLayerFontFamily(layer),
                 }}
                 enableResizing={
                   selected && !backgroundEditMode && !isInlineEditing
@@ -1733,7 +1814,7 @@ export default function DesignPage() {
                     onDone={stopInlineTextEdit}
                   />
                 ) : (
-                  <LayerRenderer
+                  <SafeLayerRenderer
                     layer={layer}
                     selected={selected}
                     exportMode={exportMode}
@@ -1842,9 +1923,11 @@ export default function DesignPage() {
                       width: previewLayer.width,
                       height: previewLayer.height,
                       zIndex: previewLayer.zIndex ?? 1,
+                      overflow: exportMode ? "visible" : undefined,
+                      fontFamily: getLayerFontFamily(previewLayer),
                     }}
                   >
-                    <LayerRenderer
+                    <SafeLayerRenderer
                       layer={previewLayer}
                       selected={false}
                       exportMode={exportMode}
@@ -2017,10 +2100,14 @@ export default function DesignPage() {
                 onShowLayerFramesChange={setShowLayerFrames}
                 layers={layers}
                 selectedLayerId={selectedLayerId}
+                selectedLayerIds={selectedLayerIds}
                 selectedLayer={selectedLayer}
+                selectedLayerFontFamily={selectedLayerFontFamily}
                 onSelectLayer={selectSingleLayer}
                 onAddText={addTextLayer}
                 onAddBox={addBoxLayer}
+                onDeleteSelectedLayers={deleteSelectedLayers}
+                onSelectedFontChange={updateSelectedLayerFont}
                 onUpdateLayer={updateLayer}
                 onDeleteLayer={deleteLayer}
                 onDuplicateLayer={duplicateLayer}
@@ -2036,8 +2123,8 @@ export default function DesignPage() {
         className="fixed inset-x-0 bottom-0 z-40 border-t border-zinc-200 bg-white/95 p-3 shadow-2xl backdrop-blur lg:hidden"
         data-export-hidden="true"
       >
-        <div className="mx-auto grid max-w-[560px] grid-cols-5 gap-2">
-          <label className="flex cursor-pointer items-center justify-center rounded-2xl bg-zinc-100 px-2 py-2 text-xs font-bold">
+        <div className="mx-auto flex max-w-[720px] gap-2 overflow-x-auto pb-1 text-xs font-bold">
+          <label className="flex shrink-0 cursor-pointer items-center justify-center rounded-2xl bg-zinc-100 px-4 py-3">
             Upload
             <input
               type="file"
@@ -2048,29 +2135,73 @@ export default function DesignPage() {
           </label>
 
           <button
+            onClick={() => {
+              setFreeEdit(true);
+              setBackgroundEditMode(false);
+              addTextLayer();
+            }}
+            className="flex shrink-0 items-center gap-1 rounded-2xl bg-zinc-100 px-4 py-3"
+          >
+            <Type size={14} /> Chữ
+          </button>
+
+          <button
+            onClick={() => {
+              setFreeEdit(true);
+              setBackgroundEditMode(false);
+              addBoxLayer();
+            }}
+            className="flex shrink-0 items-center gap-1 rounded-2xl bg-zinc-100 px-4 py-3"
+          >
+            <Plus size={14} /> Nền
+          </button>
+
+          <select
+            value={selectedLayerFontFamily}
+            disabled={!freeEdit || !selectedLayer || selectedLayer.type === "box"}
+            onChange={(event) => updateSelectedLayerFont(event.target.value)}
+            className="shrink-0 rounded-2xl bg-zinc-100 px-3 py-3 text-xs font-bold outline-none disabled:opacity-40"
+            aria-label="Đổi font chữ"
+          >
+            {FONT_OPTIONS.map((font) => (
+              <option key={font.value} value={font.value}>
+                {font.label}
+              </option>
+            ))}
+          </select>
+
+          <button
+            onClick={deleteSelectedLayers}
+            disabled={!canDeleteSelectedLayers}
+            className="flex shrink-0 items-center gap-1 rounded-2xl bg-rose-100 px-4 py-3 text-rose-700 disabled:opacity-40"
+          >
+            <Trash2 size={14} /> Xóa
+          </button>
+
+          <button
             onClick={resetBubblePosition}
-            className="rounded-2xl bg-zinc-100 px-2 py-2 text-xs font-bold"
+            className="shrink-0 rounded-2xl bg-zinc-100 px-4 py-3"
           >
             Reset
           </button>
 
           <button
             onClick={() => setMobileCanvasFullscreen(true)}
-            className="rounded-2xl bg-zinc-100 px-2 py-2 text-xs font-bold"
+            className="shrink-0 rounded-2xl bg-zinc-100 px-4 py-3"
           >
             Zoom
           </button>
 
           <button
             onClick={() => saveDesignToLocalStorage(true)}
-            className="rounded-2xl bg-amber-100 px-2 py-2 text-xs font-bold text-amber-950"
+            className="shrink-0 rounded-2xl bg-amber-100 px-4 py-3 text-amber-950"
           >
             Lưu
           </button>
 
           <button
             onClick={exportImage}
-            className="rounded-2xl bg-zinc-950 px-2 py-2 text-xs font-bold text-white"
+            className="shrink-0 rounded-2xl bg-zinc-950 px-4 py-3 text-white"
           >
             Tải
           </button>
@@ -2133,6 +2264,42 @@ export default function DesignPage() {
               ].join(" ")}
             >
               Ảnh nền
+            </button>
+
+            <button
+              onClick={addTextLayer}
+              className="shrink-0 rounded-xl bg-white/10 px-4 py-3 text-white"
+            >
+              + Chữ
+            </button>
+
+            <button
+              onClick={addBoxLayer}
+              className="shrink-0 rounded-xl bg-white/10 px-4 py-3 text-white"
+            >
+              + Nền
+            </button>
+
+            <select
+              value={selectedLayerFontFamily}
+              disabled={!freeEdit || !selectedLayer || selectedLayer.type === "box"}
+              onChange={(event) => updateSelectedLayerFont(event.target.value)}
+              className="shrink-0 rounded-xl bg-white/10 px-3 py-3 text-white outline-none disabled:opacity-40"
+              aria-label="Đổi font chữ"
+            >
+              {FONT_OPTIONS.map((font) => (
+                <option key={font.value} value={font.value} className="text-black">
+                  {font.label}
+                </option>
+              ))}
+            </select>
+
+            <button
+              onClick={deleteSelectedLayers}
+              disabled={!canDeleteSelectedLayers}
+              className="shrink-0 rounded-xl bg-rose-500 px-4 py-3 text-white disabled:opacity-40"
+            >
+              Xóa
             </button>
 
             <button
@@ -2235,10 +2402,14 @@ export default function DesignPage() {
                 onShowLayerFramesChange={setShowLayerFrames}
                 layers={layers}
                 selectedLayerId={selectedLayerId}
+                selectedLayerIds={selectedLayerIds}
                 selectedLayer={selectedLayer}
+                selectedLayerFontFamily={selectedLayerFontFamily}
                 onSelectLayer={selectSingleLayer}
                 onAddText={addTextLayer}
                 onAddBox={addBoxLayer}
+                onDeleteSelectedLayers={deleteSelectedLayers}
+                onSelectedFontChange={updateSelectedLayerFont}
                 onUpdateLayer={updateLayer}
                 onDeleteLayer={deleteLayer}
                 onDuplicateLayer={duplicateLayer}
@@ -2382,6 +2553,108 @@ export default function DesignPage() {
   );
 }
 
+
+function isSingleLineTextLayer(layer: DesignLayer) {
+  if (layer.type === "box" || layer.type === "service-list") return false;
+
+  const text = layer.text ?? "";
+  return text.trim().length > 0 && !text.includes("\n");
+}
+
+function SafeLayerRenderer({
+  layer,
+  selected,
+  exportMode,
+  showFrame,
+  onClick,
+}: {
+  layer: DesignLayer;
+  selected: boolean;
+  exportMode: boolean;
+  showFrame: boolean;
+  onClick: () => void;
+}) {
+  if (exportMode && isSingleLineTextLayer(layer)) {
+    return <ExportSingleLineTextLayer layer={layer} />;
+  }
+
+  return (
+    <LayerRenderer
+      layer={layer}
+      selected={selected}
+      exportMode={exportMode}
+      showFrame={showFrame}
+      onClick={onClick}
+    />
+  );
+}
+
+function ExportSingleLineTextLayer({ layer }: { layer: DesignLayer }) {
+  const layerAny = layer as DesignLayer & Record<string, unknown>;
+
+  return (
+    <div
+      className="h-full w-full"
+      data-export-nowrap="true"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent:
+          layer.textAlign === "center"
+            ? "center"
+            : layer.textAlign === "right"
+              ? "flex-end"
+              : "flex-start",
+        color: layer.color ?? "inherit",
+        fontSize: layer.fontSize,
+        fontWeight: layer.fontWeight,
+        textAlign: layer.textAlign ?? "left",
+        letterSpacing: layer.letterSpacing,
+        lineHeight: layer.lineHeight ?? 1.15,
+        padding: `0 ${layer.padding ?? 0}px`,
+        fontFamily:
+          typeof layerAny.fontFamily === "string"
+            ? layerAny.fontFamily
+            : "inherit",
+        opacity: layer.opacity ?? 1,
+        WebkitTextFillColor: layer.color ?? "inherit",
+        textShadow:
+          typeof layerAny.textShadow === "string"
+            ? layerAny.textShadow
+            : undefined,
+        textTransform:
+          typeof layerAny.textTransform === "string"
+            ? (layerAny.textTransform as React.CSSProperties["textTransform"])
+            : undefined,
+        whiteSpace: "pre",
+        wordBreak: "keep-all",
+        overflowWrap: "normal",
+        overflow: "visible",
+        background: layer.background ?? "transparent",
+        borderRadius: layer.borderRadius,
+        border:
+          typeof layerAny.borderWidth === "number" &&
+          typeof layerAny.borderColor === "string"
+            ? `${layerAny.borderWidth}px solid ${layerAny.borderColor}`
+            : undefined,
+      }}
+    >
+      <span
+        style={{
+          display: "inline-block",
+          maxWidth: "none",
+          whiteSpace: "pre",
+          wordBreak: "keep-all",
+          overflowWrap: "normal",
+          overflow: "visible",
+        }}
+      >
+        {layer.text}
+      </span>
+    </div>
+  );
+}
+
 function InlineLayerTextEditor({
   layer,
   value,
@@ -2439,7 +2712,7 @@ function InlineLayerTextEditor({
             layer.type === "service-list"
               ? (layer.padding ?? 4)
               : `0 ${layer.padding ?? 4}px`,
-          fontFamily: "inherit",
+          fontFamily: getLayerFontFamily(layer),
           opacity: layer.opacity ?? 1,
           WebkitTextFillColor: layer.color ?? "inherit",
           caretColor: layer.color ?? "#111827",
@@ -2614,10 +2887,14 @@ function FreeEditTools({
   onShowLayerFramesChange,
   layers,
   selectedLayerId,
+  selectedLayerIds,
   selectedLayer,
+  selectedLayerFontFamily,
   onSelectLayer,
   onAddText,
   onAddBox,
+  onDeleteSelectedLayers,
+  onSelectedFontChange,
   onUpdateLayer,
   onDeleteLayer,
   onDuplicateLayer,
@@ -2630,10 +2907,14 @@ function FreeEditTools({
   onShowLayerFramesChange: (value: boolean) => void;
   layers: DesignLayer[];
   selectedLayerId: string;
+  selectedLayerIds: string[];
   selectedLayer?: DesignLayer;
+  selectedLayerFontFamily: string;
   onSelectLayer: (id: string) => void;
   onAddText: () => void;
   onAddBox: () => void;
+  onDeleteSelectedLayers: () => void;
+  onSelectedFontChange: (fontFamily: string) => void;
   onUpdateLayer: (layer: DesignLayer) => void;
   onDeleteLayer: (id: string) => void;
   onDuplicateLayer: (layer: DesignLayer) => void;
@@ -2675,7 +2956,7 @@ function FreeEditTools({
             />
           </label>
 
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-3 gap-2">
             <button
               type="button"
               onClick={onAddText}
@@ -2691,6 +2972,34 @@ function FreeEditTools({
             >
               <Plus size={15} /> Thêm nền
             </button>
+
+            <button
+              type="button"
+              onClick={onDeleteSelectedLayers}
+              disabled={selectedLayerIds.length === 0 || selectedLayerIds.length >= layers.length}
+              className="flex items-center justify-center gap-2 rounded-xl bg-rose-50 px-3 py-3 text-xs font-bold text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Trash2 size={15} /> Xóa
+            </button>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-bold">Font chữ</label>
+            <select
+              value={selectedLayerFontFamily}
+              disabled={!selectedLayer || selectedLayer.type === "box"}
+              onChange={(event) => onSelectedFontChange(event.target.value)}
+              className="w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm font-bold outline-none focus:border-zinc-950 disabled:opacity-40"
+            >
+              {FONT_OPTIONS.map((font) => (
+                <option key={font.value} value={font.value}>
+                  {font.label}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
+              Chọn một hoặc quét nhiều element chữ rồi đổi font, chữ sẽ đổi ngay.
+            </p>
           </div>
 
           <div>

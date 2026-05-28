@@ -141,6 +141,8 @@ export default function DesignPage() {
   const captureRef = useRef<HTMLDivElement | null>(null);
   const pinchRef = useRef<PinchState | null>(null);
   const backgroundGestureRef = useRef<BackgroundGesture | null>(null);
+  const layerDragRef = useRef(false);
+  const inlineEditorRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
 
   const [imageUrl, setImageUrl] = useState("");
   const [imageNaturalRatio, setImageNaturalRatio] = useState<number>(9 / 16);
@@ -175,6 +177,7 @@ export default function DesignPage() {
   const [selectedLayerId, setSelectedLayerId] = useState("brand");
   const [exportMode, setExportMode] = useState(false);
   const [pinchingLayerId, setPinchingLayerId] = useState<string | null>(null);
+  const [editingLayerId, setEditingLayerId] = useState<string | null>(null);
 
   const [exportPreviewUrl, setExportPreviewUrl] = useState("");
   const [exportFileName, setExportFileName] = useState("");
@@ -816,6 +819,31 @@ export default function DesignPage() {
     return layer.text ?? "";
   }
 
+  function startInlineTextEdit(layer: DesignLayer) {
+    if (layer.type === "box") {
+      setSelectedLayerId(layer.id);
+      setEditingLayerId(null);
+      return;
+    }
+
+    if (layerDragRef.current || backgroundEditMode || exportMode) return;
+
+    setSelectedLayerId(layer.id);
+    setEditingLayerId(layer.id);
+
+    requestAnimationFrame(() => {
+      inlineEditorRefs.current[layer.id]?.focus();
+      inlineEditorRefs.current[layer.id]?.setSelectionRange(
+        inlineEditorRefs.current[layer.id]?.value.length ?? 0,
+        inlineEditorRefs.current[layer.id]?.value.length ?? 0,
+      );
+    });
+  }
+
+  function stopInlineTextEdit() {
+    setEditingLayerId(null);
+  }
+
   function saveDesignToLocalStorage(showToast = true) {
     const payload: SavedDesignState = {
       imageUrl,
@@ -939,6 +967,7 @@ export default function DesignPage() {
 
     try {
       saveDesignToLocalStorage(false);
+      setEditingLayerId(null);
       setExportMode(true);
       setMobileTextEditorOpen(false);
       setMobileControlsOpen(false);
@@ -1078,134 +1107,132 @@ export default function DesignPage() {
       )}
 
       {freeEdit ? (
-  [...layers]
-    .sort((a, b) => (a.zIndex ?? 1) - (b.zIndex ?? 1))
-    .map((layer) => {
-      const selected = selectedLayerId === layer.id;
+        [...layers]
+          .sort((a, b) => (a.zIndex ?? 1) - (b.zIndex ?? 1))
+          .map((layer) => {
+            const selected = selectedLayerId === layer.id;
+            const canEditText = layer.type !== "box";
+            const isInlineEditing =
+              canEditText && selected && editingLayerId === layer.id && !exportMode;
 
-      return (
-        <Rnd
-          key={layer.id}
-          bounds="parent"
-          size={{
-            width: layer.width,
-            height: layer.height,
-          }}
-          position={{
-            x: layer.x,
-            y: layer.y,
-          }}
-          onMouseDown={() => setSelectedLayerId(layer.id)}
-          onPointerDown={() => setSelectedLayerId(layer.id)}
-          onTouchStart={(event:any) => handleLayerTouchStart(event, layer)}
-          onTouchMove={(event:any) => handleLayerTouchMove(event, layer)}
-          onTouchEnd={handleLayerTouchEnd}
-          onTouchCancel={handleLayerTouchEnd}
-          onDragStart={() => setSelectedLayerId(layer.id)}
-          onDrag={(_, data) =>
-            updateLayer({
-              ...layer,
-              x: data.x,
-              y: data.y,
-            })
-          }
-          onDragStop={(_, data) =>
-            updateLayer({
-              ...layer,
-              x: data.x,
-              y: data.y,
-            })
-          }
-          onResizeStart={() => setSelectedLayerId(layer.id)}
-          onResize={(_, __, ref, ___, position) => {
-            updateLayer({
-              ...layer,
-              width: readPixelValue(ref.style.width),
-              height: readPixelValue(ref.style.height),
-              x: position.x,
-              y: position.y,
-            });
-          }}
-          onResizeStop={(_, __, ref, ___, position) => {
-            updateLayer({
-              ...layer,
-              width: readPixelValue(ref.style.width),
-              height: readPixelValue(ref.style.height),
-              x: position.x,
-              y: position.y,
-            });
-          }}
-          minWidth={28}
-          minHeight={14}
-          enableUserSelectHack={false}
-          disableDragging={backgroundEditMode || pinchingLayerId === layer.id}
-          className="select-none"
-          style={{
-            zIndex: layer.zIndex ?? 1,
-            touchAction: 'none',
-            pointerEvents: backgroundEditMode ? 'none' : 'auto',
-          }}
-          enableResizing={
-            selected && !backgroundEditMode
-              ? {
-                  top: true,
-                  right: true,
-                  bottom: true,
-                  left: true,
-                  topLeft: true,
-                  topRight: true,
-                  bottomLeft: true,
-                  bottomRight: true,
+            return (
+              <Rnd
+                key={layer.id}
+                bounds="parent"
+                size={{
+                  width: layer.width,
+                  height: layer.height,
+                }}
+                position={{
+                  x: layer.x,
+                  y: layer.y,
+                }}
+                onMouseDown={() => setSelectedLayerId(layer.id)}
+                onPointerDown={() => setSelectedLayerId(layer.id)}
+                onTouchStart={(event: any) => handleLayerTouchStart(event, layer)}
+                onTouchMove={(event: any) => handleLayerTouchMove(event, layer)}
+                onTouchEnd={handleLayerTouchEnd}
+                onTouchCancel={handleLayerTouchEnd}
+                onDragStart={() => {
+                  layerDragRef.current = true;
+                  setEditingLayerId(null);
+                  setSelectedLayerId(layer.id);
+                }}
+                onDrag={(_, data) =>
+                  updateLayer({
+                    ...layer,
+                    x: data.x,
+                    y: data.y,
+                  })
                 }
-              : false
-          }
-          resizeHandleStyles={getDashedResizeHandleStyles(selected)}
-          cancel=".inline-layer-text-editor"
-        >
-          <LayerRenderer
-            layer={layer}
-            selected={selected}
-            exportMode={exportMode}
-            showFrame={showLayerFrames}
-            onClick={() => setSelectedLayerId(layer.id)}
-          />
+                onDragStop={(_, data) => {
+                  updateLayer({
+                    ...layer,
+                    x: data.x,
+                    y: data.y,
+                  });
 
-          {selected && !exportMode && !backgroundEditMode && layer.type !== "box" && (
-            <textarea
-              className="inline-layer-text-editor absolute inset-0 z-[90] h-full w-full resize-none border-0 bg-transparent p-0 outline-none"
-              value={getLayerTextValue(layer)}
-              onChange={(event) => updateLayerText(layer, event.target.value)}
-              onPointerDown={(event) => {
-                event.stopPropagation();
-                setSelectedLayerId(layer.id);
-              }}
-              onTouchStart={(event) => {
-                event.stopPropagation();
-                setSelectedLayerId(layer.id);
-              }}
-              onClick={(event) => {
-                event.stopPropagation();
-                event.currentTarget.focus();
-              }}
-              style={{
-                color: layer.color ?? "inherit",
-                fontSize: layer.fontSize,
-                fontWeight: layer.fontWeight,
-                textAlign: layer.textAlign ?? "left",
-                lineHeight: layer.lineHeight ?? 1.2,
-                padding: layer.padding ?? 0,
-                fontFamily: "inherit",
-                opacity: layer.opacity ?? 1,
-                WebkitTextFillColor: layer.color ?? "inherit",
-                caretColor: layer.color ?? "#111827",
-                overflow: "hidden",
-              }}
-              aria-label={`Sửa ${layer.name}`}
-            />
-          )}
-        </Rnd>
-      );
-    })
+                  window.setTimeout(() => {
+                    layerDragRef.current = false;
+                  }, 80);
+                }}
+                onResizeStart={() => {
+                  setEditingLayerId(null);
+                  setSelectedLayerId(layer.id);
+                }}
+                onResize={(_, __, ref, ___, position) => {
+                  updateLayer({
+                    ...layer,
+                    width: readPixelValue(ref.style.width),
+                    height: readPixelValue(ref.style.height),
+                    x: position.x,
+                    y: position.y,
+                  });
+                }}
+                onResizeStop={(_, __, ref, ___, position) => {
+                  updateLayer({
+                    ...layer,
+                    width: readPixelValue(ref.style.width),
+                    height: readPixelValue(ref.style.height),
+                    x: position.x,
+                    y: position.y,
+                  });
+                }}
+                minWidth={28}
+                minHeight={14}
+                enableUserSelectHack={false}
+                disableDragging={
+                  backgroundEditMode ||
+                  pinchingLayerId === layer.id ||
+                  isInlineEditing
+                }
+                className="select-none"
+                style={{
+                  zIndex: layer.zIndex ?? 1,
+                  touchAction: isInlineEditing ? "auto" : "none",
+                  pointerEvents: backgroundEditMode ? "none" : "auto",
+                }}
+                enableResizing={
+                  selected && !backgroundEditMode && !isInlineEditing
+                    ? {
+                        top: true,
+                        right: true,
+                        bottom: true,
+                        left: true,
+                        topLeft: true,
+                        topRight: true,
+                        bottomLeft: true,
+                        bottomRight: true,
+                      }
+                    : false
+                }
+                resizeHandleStyles={getDashedResizeHandleStyles(
+                  selected && !isInlineEditing,
+                )}
+                cancel=".inline-layer-text-editor,.inline-layer-edit-done"
+              >
+                {isInlineEditing ? (
+                  <InlineLayerTextEditor
+                    layer={layer}
+                    value={getLayerTextValue(layer)}
+                    inputRef={(element) => {
+                      inlineEditorRefs.current[layer.id] = element;
+                    }}
+                    onChange={(value) => updateLayerText(layer, value)}
+                    onDone={stopInlineTextEdit}
+                  />
+                ) : (
+                  <LayerRenderer
+                    layer={layer}
+                    selected={selected}
+                    exportMode={exportMode}
+                    showFrame={showLayerFrames}
+                    onClick={() => startInlineTextEdit(layer)}
+                  />
+                )}
+              </Rnd>
+            );
+          })
       ) : (
         <Rnd
           bounds="parent"
@@ -1257,8 +1284,8 @@ export default function DesignPage() {
           enableUserSelectHack={false}
           className="select-none"
           style={{
-            touchAction: 'none',
-            pointerEvents: backgroundEditMode ? 'none' : 'auto',
+            touchAction: "none",
+            pointerEvents: backgroundEditMode ? "none" : "auto",
             overflow: "hidden",
             ...(!backgroundEditMode ? parentBubbleFrameStyle : {}),
           }}
@@ -1774,6 +1801,84 @@ export default function DesignPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+
+function InlineLayerTextEditor({
+  layer,
+  value,
+  inputRef,
+  onChange,
+  onDone,
+}: {
+  layer: DesignLayer;
+  value: string;
+  inputRef: (element: HTMLTextAreaElement | null) => void;
+  onChange: (value: string) => void;
+  onDone: () => void;
+}) {
+  return (
+    <div
+      className="relative h-full w-full"
+      style={{
+        borderRadius: layer.borderRadius,
+        outline: "2px dashed #38bdf8",
+        outlineOffset: "-2px",
+        boxShadow:
+          "0 0 0 3px rgba(56,189,248,0.32), 0 10px 28px rgba(0,0,0,0.22)",
+        background: layer.background ?? "rgba(255,255,255,0.02)",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        className="pointer-events-none absolute left-0 top-[-24px] z-[99] max-w-full rounded-full bg-sky-400 px-2 py-1 text-[11px] font-black leading-none text-slate-950 shadow-lg"
+      >
+        {layer.name}
+      </div>
+
+      <textarea
+        ref={inputRef}
+        className="inline-layer-text-editor h-full w-full resize-none border-0 bg-transparent outline-none"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onPointerDown={(event) => event.stopPropagation()}
+        onTouchStart={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          event.currentTarget.focus();
+        }}
+        style={{
+          color: layer.color ?? "inherit",
+          fontSize: layer.fontSize,
+          fontWeight: layer.fontWeight,
+          textAlign: layer.textAlign ?? "left",
+          letterSpacing: layer.letterSpacing,
+          lineHeight: layer.lineHeight ?? 1.2,
+          padding: layer.type === "service-list" ? layer.padding ?? 4 : `0 ${layer.padding ?? 4}px`,
+          fontFamily: "inherit",
+          opacity: layer.opacity ?? 1,
+          WebkitTextFillColor: layer.color ?? "inherit",
+          caretColor: layer.color ?? "#111827",
+          overflow: "hidden",
+          whiteSpace: "pre-wrap",
+        }}
+        aria-label={`Sửa ${layer.name}`}
+      />
+
+      <button
+        type="button"
+        onPointerDown={(event) => event.stopPropagation()}
+        onTouchStart={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          onDone();
+        }}
+        className="inline-layer-edit-done absolute bottom-1 right-1 z-[100] rounded-full bg-zinc-950 px-3 py-1 text-[11px] font-black text-white shadow-lg"
+      >
+        Xong
+      </button>
     </div>
   );
 }

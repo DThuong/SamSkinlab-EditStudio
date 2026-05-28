@@ -227,6 +227,19 @@ export default function DesignPage() {
 
   const selectedLayer = layers.find((item) => item.id === selectedLayerId);
 
+  // Base size của template cha. Khi resize/zoom template cha, toàn bộ nội dung
+  // bên trong sẽ được scale theo base này để chữ, icon, padding và layout
+  // không bị lệch khỏi khung trên mobile.
+  const parentBubbleBaseBox = activeTemplate.defaultBox;
+  const parentBubbleAspectRatio =
+    parentBubbleBaseBox.width / Math.max(parentBubbleBaseBox.height, 1);
+  const parentBubbleScaleX =
+    bubbleBox.width / Math.max(parentBubbleBaseBox.width, 1);
+  const parentBubbleScaleY =
+    bubbleBox.height / Math.max(parentBubbleBaseBox.height, 1);
+  const parentBubbleMinWidth = 170;
+  const parentBubbleMinHeight = Math.max(120, Math.round(parentBubbleMinWidth / parentBubbleAspectRatio));
+
   function readPixelValue(value: string) {
     const parsed = Number.parseFloat(value.replace("px", ""));
     return Number.isFinite(parsed) ? parsed : 0;
@@ -1238,13 +1251,15 @@ export default function DesignPage() {
               y: position.y,
             });
           }}
-          minWidth={170}
-          minHeight={160}
+          minWidth={parentBubbleMinWidth}
+          minHeight={parentBubbleMinHeight}
+          lockAspectRatio={parentBubbleAspectRatio}
           enableUserSelectHack={false}
           className="select-none"
           style={{
             touchAction: 'none',
             pointerEvents: backgroundEditMode ? 'none' : 'auto',
+            overflow: "hidden",
             ...(!backgroundEditMode ? parentBubbleFrameStyle : {}),
           }}
           enableResizing={
@@ -1263,12 +1278,23 @@ export default function DesignPage() {
           }
           resizeHandleStyles={getDashedResizeHandleStyles(!backgroundEditMode)}
         >
-          <BubbleRenderer
-            templateId={templateId}
-            content={content}
-            opacity={opacity}
-            accentColor={accentColor}
-          />
+          <div
+            className="origin-top-left"
+            style={{
+              width: parentBubbleBaseBox.width,
+              height: parentBubbleBaseBox.height,
+              transform: `scale(${parentBubbleScaleX}, ${parentBubbleScaleY})`,
+              transformOrigin: "top left",
+              pointerEvents: "none",
+            }}
+          >
+            <BubbleRenderer
+              templateId={templateId}
+              content={content}
+              opacity={opacity}
+              accentColor={accentColor}
+            />
+          </div>
         </Rnd>
       )}
     </div>

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Rnd } from "react-rnd";
 import { toBlob } from "html-to-image";
 import { ImagePlus, Menu, Plus, Type, X } from "lucide-react";
@@ -85,6 +85,57 @@ const ratioOptions: {
 
 const MIN_IMAGE_SCALE = 0.3;
 const MAX_IMAGE_SCALE = 5;
+const SAVED_DESIGN_KEY = "sam-bubble-studio-last-design";
+
+type SavedDesignState = {
+  imageUrl: string;
+  imageNaturalRatio: number;
+  imageTransform: ImageTransform;
+  canvasRatioId: CanvasRatioId;
+  imageFit: ImageFit;
+  canvasBgColor: string;
+  templateId: BubbleTemplateId;
+  content: BubbleContent;
+  opacity: number;
+  accentColor: string;
+  freeEdit: boolean;
+  backgroundEditMode: boolean;
+  showLayerFrames: boolean;
+  layers: DesignLayer[];
+  selectedLayerId: string;
+  bubbleBox: BubbleBox;
+  savedAt: string;
+};
+
+function readSavedDesign(): SavedDesignState | null {
+  try {
+    const raw = localStorage.getItem(SAVED_DESIGN_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as SavedDesignState;
+  } catch (error) {
+    console.warn("Cannot read saved design:", error);
+    return null;
+  }
+}
+
+function loadImageElement(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Cannot load image for export"));
+    image.src = src;
+  });
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("Không tạo được PNG từ canvas."));
+    }, "image/png", 1);
+  });
+}
+
 
 export default function DesignPage() {
   const captureRef = useRef<HTMLDivElement | null>(null);
@@ -147,6 +198,32 @@ export default function DesignPage() {
   const [bubbleBox, setBubbleBox] = useState<BubbleBox>(
     activeTemplate.defaultBox,
   );
+
+  useEffect(() => {
+    const saved = readSavedDesign();
+    if (!saved) return;
+
+    setImageUrl(saved.imageUrl ?? "");
+    setImageNaturalRatio(saved.imageNaturalRatio || 9 / 16);
+    setImageTransform(saved.imageTransform ?? { x: 0, y: 0, scale: 1 });
+    setCanvasRatioId(saved.canvasRatioId ?? "9:16");
+    setImageFit(saved.imageFit ?? "contain");
+    setCanvasBgColor(saved.canvasBgColor ?? "#ffffff");
+    setTemplateId(saved.templateId ?? "left-service-panel");
+    setContent(saved.content ?? loadContent());
+    setOpacity(typeof saved.opacity === "number" ? saved.opacity : 0.92);
+    setAccentColor(saved.accentColor ?? "#d8bd7f");
+    setFreeEdit(Boolean(saved.freeEdit));
+    setBackgroundEditMode(Boolean(saved.backgroundEditMode));
+    setShowLayerFrames(saved.showLayerFrames ?? true);
+    setLayers(
+      Array.isArray(saved.layers) && saved.layers.length > 0
+        ? saved.layers
+        : createDefaultDesignLayers(saved.content ?? loadContent(), saved.templateId ?? "left-service-panel"),
+    );
+    setSelectedLayerId(saved.selectedLayerId ?? "brand");
+    setBubbleBox(saved.bubbleBox ?? activeTemplate.defaultBox);
+  }, []);
 
   const selectedLayer = layers.find((item) => item.id === selectedLayerId);
 
@@ -701,6 +778,146 @@ export default function DesignPage() {
     setMobileTextEditorOpen(false);
   }
 
+  function updateLayerText(layer: DesignLayer, value: string) {
+    if (layer.type === "box") return;
+
+    if (layer.type === "service-list") {
+      updateLayer({
+        ...layer,
+        services: value.split("\n"),
+      });
+      return;
+    }
+
+    updateLayer({
+      ...layer,
+      text: value,
+    });
+  }
+
+  function getLayerTextValue(layer: DesignLayer) {
+    if (layer.type === "service-list") {
+      return (layer.services ?? []).join("\n");
+    }
+
+    return layer.text ?? "";
+  }
+
+  function saveDesignToLocalStorage(showToast = true) {
+    const payload: SavedDesignState = {
+      imageUrl,
+      imageNaturalRatio,
+      imageTransform,
+      canvasRatioId,
+      imageFit,
+      canvasBgColor,
+      templateId,
+      content,
+      opacity,
+      accentColor,
+      freeEdit,
+      backgroundEditMode,
+      showLayerFrames,
+      layers,
+      selectedLayerId,
+      bubbleBox,
+      savedAt: new Date().toISOString(),
+    };
+
+    try {
+      localStorage.setItem(SAVED_DESIGN_KEY, JSON.stringify(payload));
+      if (showToast) alert("Đã lưu bản chỉnh sửa gần nhất trên trình duyệt này.");
+      return true;
+    } catch (error) {
+      console.error("Save design failed:", error);
+      alert(
+        "Không lưu được vào localStorage. Ảnh upload có thể quá nặng, bạn thử dùng ảnh nhẹ hơn hoặc chụp màn hình nén lại rồi upload lại.",
+      );
+      return false;
+    }
+  }
+
+  async function exportCompositedImage(node: HTMLElement, pixelRatio: number) {
+    const rect = node.getBoundingClientRect();
+    const cssWidth = rect.width;
+    const cssHeight = rect.height;
+
+    const overlayBlob = await toBlob(node, {
+      cacheBust: true,
+      pixelRatio,
+      backgroundColor: "rgba(255,255,255,0)",
+      fontEmbedCSS: "",
+      filter: (node) => {
+        if (node instanceof HTMLElement) {
+          return (
+            !node.closest('[data-export-hidden="true"]') &&
+            !node.closest('[data-export-bg="true"]')
+          );
+        }
+
+        return true;
+      },
+    });
+
+    if (!overlayBlob) throw new Error("Không tạo được layer template.");
+
+    const overlayUrl = URL.createObjectURL(overlayBlob);
+
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(cssWidth * pixelRatio);
+      canvas.height = Math.round(cssHeight * pixelRatio);
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Trình duyệt không hỗ trợ canvas.");
+
+      ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      ctx.fillStyle = canvasBgColor;
+      ctx.fillRect(0, 0, cssWidth, cssHeight);
+
+      if (imageUrl) {
+        const bgImage = await loadImageElement(imageUrl);
+        const imageRatio = bgImage.width / bgImage.height;
+        const canvasRatio = cssWidth / cssHeight;
+        const fitScale =
+          imageFit === "cover"
+            ? imageRatio > canvasRatio
+              ? cssHeight / bgImage.height
+              : cssWidth / bgImage.width
+            : imageRatio > canvasRatio
+              ? cssWidth / bgImage.width
+              : cssHeight / bgImage.height;
+
+        const drawWidth = bgImage.width * fitScale;
+        const drawHeight = bgImage.height * fitScale;
+        const baseX = (cssWidth - drawWidth) / 2;
+        const baseY = (cssHeight - drawHeight) / 2;
+
+        ctx.save();
+        ctx.translate(
+          cssWidth / 2 + imageTransform.x,
+          cssHeight / 2 + imageTransform.y,
+        );
+        ctx.scale(imageTransform.scale, imageTransform.scale);
+        ctx.drawImage(
+          bgImage,
+          baseX - cssWidth / 2,
+          baseY - cssHeight / 2,
+          drawWidth,
+          drawHeight,
+        );
+        ctx.restore();
+      }
+
+      const overlayImage = await loadImageElement(overlayUrl);
+      ctx.drawImage(overlayImage, 0, 0, cssWidth, cssHeight);
+
+      return await canvasToBlob(canvas);
+    } finally {
+      URL.revokeObjectURL(overlayUrl);
+    }
+  }
+
   async function exportImage() {
     if (!captureRef.current) {
       alert("Không tìm thấy khu vực thiết kế để tải ảnh.");
@@ -708,11 +925,14 @@ export default function DesignPage() {
     }
 
     try {
+      saveDesignToLocalStorage(false);
       setExportMode(true);
+      setMobileTextEditorOpen(false);
+      setMobileControlsOpen(false);
 
       await new Promise((resolve) => {
         requestAnimationFrame(() => {
-          setTimeout(resolve, 220);
+          setTimeout(resolve, 260);
         });
       });
 
@@ -720,28 +940,10 @@ export default function DesignPage() {
       await waitForImages(node);
 
       const currentWidth = node.getBoundingClientRect().width;
-      const pixelRatio = Math.max(2, 2160 / Math.max(currentWidth, 1));
+      const pixelRatio = Math.min(4, Math.max(2, 2160 / Math.max(currentWidth, 1)));
+      const blob = await exportCompositedImage(node, pixelRatio);
 
-      const blob = await toBlob(node, {
-        cacheBust: true,
-        pixelRatio,
-        backgroundColor: undefined,
-        fontEmbedCSS: "",
-        imagePlaceholder: imageUrl || undefined,
-        filter: (node) => {
-          if (node instanceof HTMLElement) {
-            return node.dataset.exportHidden !== "true";
-          }
-
-          return true;
-        },
-      });
-
-      if (!blob) {
-        throw new Error("Không tạo được file ảnh.");
-      }
-
-      downloadOrPreviewBlob(blob, "sam-bubble-studio-2k.png");
+      await downloadOrPreviewBlob(blob, "sam-bubble-studio-2k.png");
     } catch (error) {
       console.error("Export image failed:", error);
       alert(
@@ -812,6 +1014,7 @@ export default function DesignPage() {
     >
       {imageUrl ? (
         <div
+          data-export-bg="true"
           className="absolute inset-0"
           style={{
             touchAction: backgroundEditMode ? "none" : "auto",
@@ -851,6 +1054,7 @@ export default function DesignPage() {
 
       {backgroundEditMode && !exportMode && (
         <div
+          data-export-hidden="true"
           className="pointer-events-none absolute inset-0 z-[60]"
           style={{
             outline: "2px dashed rgba(52,211,153,0.95)",
@@ -943,6 +1147,7 @@ export default function DesignPage() {
               : false
           }
           resizeHandleStyles={getDashedResizeHandleStyles(selected)}
+          cancel=".inline-layer-text-editor"
         >
           <LayerRenderer
             layer={layer}
@@ -951,6 +1156,40 @@ export default function DesignPage() {
             showFrame={showLayerFrames}
             onClick={() => setSelectedLayerId(layer.id)}
           />
+
+          {selected && !exportMode && !backgroundEditMode && layer.type !== "box" && (
+            <textarea
+              className="inline-layer-text-editor absolute inset-0 z-[90] h-full w-full resize-none border-0 bg-transparent p-0 outline-none"
+              value={getLayerTextValue(layer)}
+              onChange={(event) => updateLayerText(layer, event.target.value)}
+              onPointerDown={(event) => {
+                event.stopPropagation();
+                setSelectedLayerId(layer.id);
+              }}
+              onTouchStart={(event) => {
+                event.stopPropagation();
+                setSelectedLayerId(layer.id);
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+                event.currentTarget.focus();
+              }}
+              style={{
+                color: layer.color ?? "inherit",
+                fontSize: layer.fontSize,
+                fontWeight: layer.fontWeight,
+                textAlign: layer.textAlign ?? "left",
+                lineHeight: layer.lineHeight ?? 1.2,
+                padding: layer.padding ?? 0,
+                fontFamily: "inherit",
+                opacity: layer.opacity ?? 1,
+                WebkitTextFillColor: layer.color ?? "inherit",
+                caretColor: layer.color ?? "#111827",
+                overflow: "hidden",
+              }}
+              aria-label={`Sửa ${layer.name}`}
+            />
+          )}
         </Rnd>
       );
     })
@@ -1165,7 +1404,7 @@ export default function DesignPage() {
         className="fixed inset-x-0 bottom-0 z-40 border-t border-zinc-200 bg-white/95 p-3 shadow-2xl backdrop-blur lg:hidden"
         data-export-hidden="true"
       >
-        <div className="mx-auto grid max-w-[520px] grid-cols-4 gap-2">
+        <div className="mx-auto grid max-w-[560px] grid-cols-5 gap-2">
           <label className="flex cursor-pointer items-center justify-center rounded-2xl bg-zinc-100 px-2 py-2 text-xs font-bold">
             Upload
             <input
@@ -1191,10 +1430,17 @@ export default function DesignPage() {
           </button>
 
           <button
+            onClick={() => saveDesignToLocalStorage(true)}
+            className="rounded-2xl bg-amber-100 px-2 py-2 text-xs font-bold text-amber-950"
+          >
+            Lưu
+          </button>
+
+          <button
             onClick={exportImage}
             className="rounded-2xl bg-zinc-950 px-2 py-2 text-xs font-bold text-white"
           >
-            Tải 2K
+            Tải
           </button>
         </div>
       </div>
@@ -1281,6 +1527,13 @@ export default function DesignPage() {
               className="shrink-0 rounded-xl bg-white/10 px-4 py-3 text-white"
             >
               Công cụ
+            </button>
+
+            <button
+              onClick={() => saveDesignToLocalStorage(true)}
+              className="shrink-0 rounded-xl bg-amber-300 px-4 py-3 text-black"
+            >
+              Lưu
             </button>
 
             <button

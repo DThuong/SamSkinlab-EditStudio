@@ -1,0 +1,1759 @@
+import { useMemo, useRef, useState } from "react";
+import { Rnd } from "react-rnd";
+import { toBlob } from "html-to-image";
+import { ImagePlus, Menu, Plus, Type, X } from "lucide-react";
+import BubbleRenderer from "../components/BubbleRenderer";
+import EditorControls from "../components/EditorControls";
+import TemplatePicker from "../components/TemplatePicker";
+import { bubbleTemplates } from "../data/bubbleTemplates";
+import { createDefaultDesignLayers } from "../data/defaultLayers";
+import { loadContent } from "../utils/storage";
+import type {
+  BubbleBox,
+  BubbleContent,
+  BubbleTemplateId,
+} from "../types/bubble";
+import type { DesignLayer } from "../types/layer";
+import LayerRenderer from "../components/free-editor/LayerRenderer";
+import LayerSettingPanel from "../components/free-editor/LayerSettingPanel";
+
+type CanvasRatioId =
+  | "9:16"
+  | "16:9"
+  | "1:1"
+  | "4:5"
+  | "5:4"
+  | "3:4"
+  | "4:3"
+  | "original";
+
+type ImageFit = "contain" | "cover";
+
+type BubblePinchState = {
+  startDistance: number;
+  startWidth: number;
+  startHeight: number;
+};
+
+type PinchState = {
+  layerId: string;
+  startDistance: number;
+  startWidth: number;
+  startHeight: number;
+  startFontSize?: number;
+};
+
+type ImageTransform = {
+  x: number;
+  y: number;
+  scale: number;
+};
+
+type BackgroundGesture =
+  | {
+      mode: "pan";
+      startX: number;
+      startY: number;
+      startTransform: ImageTransform;
+    }
+  | {
+      mode: "pinch";
+      startDistance: number;
+      startTransform: ImageTransform;
+    };
+
+const ratioOptions: {
+  id: CanvasRatioId;
+  label: string;
+  value: number | null;
+  description: string;
+}[] = [
+  { id: "9:16", label: "9:16", value: 9 / 16, description: "Story/Reels" },
+  { id: "16:9", label: "16:9", value: 16 / 9, description: "Ảnh ngang" },
+  { id: "1:1", label: "1:1", value: 1, description: "Vuông" },
+  { id: "4:5", label: "4:5", value: 4 / 5, description: "Facebook/IG" },
+  { id: "5:4", label: "5:4", value: 5 / 4, description: "Ngang nhẹ" },
+  { id: "3:4", label: "3:4", value: 3 / 4, description: "Ảnh dọc" },
+  { id: "4:3", label: "4:3", value: 4 / 3, description: "Ngang cổ điển" },
+  {
+    id: "original",
+    label: "Gốc",
+    value: null,
+    description: "Theo ảnh upload",
+  },
+];
+
+const MIN_IMAGE_SCALE = 0.3;
+const MAX_IMAGE_SCALE = 5;
+
+export default function DesignPage() {
+  const captureRef = useRef<HTMLDivElement | null>(null);
+  const pinchRef = useRef<PinchState | null>(null);
+  const backgroundGestureRef = useRef<BackgroundGesture | null>(null);
+
+  const [imageUrl, setImageUrl] = useState("");
+  const [imageNaturalRatio, setImageNaturalRatio] = useState<number>(9 / 16);
+  const [imageTransform, setImageTransform] = useState<ImageTransform>({
+    x: 0,
+    y: 0,
+    scale: 1,
+  });
+
+  const [canvasRatioId, setCanvasRatioId] = useState<CanvasRatioId>("9:16");
+  const [imageFit, setImageFit] = useState<ImageFit>("contain");
+  const [canvasBgColor, setCanvasBgColor] = useState("#ffffff");
+
+  const [templateId, setTemplateId] =
+    useState<BubbleTemplateId>("left-service-panel");
+
+  const [content, setContent] = useState<BubbleContent>(() => loadContent());
+  const [opacity, setOpacity] = useState(0.92);
+  const [accentColor, setAccentColor] = useState("#d8bd7f");
+
+  const [mobileControlsOpen, setMobileControlsOpen] = useState(false);
+  const [mobileCanvasFullscreen, setMobileCanvasFullscreen] = useState(false);
+  const [mobileTextEditorOpen, setMobileTextEditorOpen] = useState(false);
+  const [mobileTextDraft, setMobileTextDraft] = useState("");
+
+  const [freeEdit, setFreeEdit] = useState(false);
+  const [backgroundEditMode, setBackgroundEditMode] = useState(false);
+  const [showLayerFrames, setShowLayerFrames] = useState(true);
+  const [layers, setLayers] = useState<DesignLayer[]>(() =>
+    createDefaultDesignLayers(loadContent(), "left-service-panel"),
+  );
+  const [selectedLayerId, setSelectedLayerId] = useState("brand");
+  const [exportMode, setExportMode] = useState(false);
+  const [pinchingLayerId, setPinchingLayerId] = useState<string | null>(null);
+
+  const [exportPreviewUrl, setExportPreviewUrl] = useState("");
+  const [exportFileName, setExportFileName] = useState("");
+  const bubblePinchRef = useRef<BubblePinchState | null>(null);
+
+  const activeTemplate = useMemo(
+    () =>
+      bubbleTemplates.find((item) => item.id === templateId) ??
+      bubbleTemplates[0],
+    [templateId],
+  );
+
+  const selectedRatio = useMemo(
+    () =>
+      ratioOptions.find((item) => item.id === canvasRatioId) ?? ratioOptions[0],
+    [canvasRatioId],
+  );
+
+  const canvasAspectRatio = selectedRatio.value ?? imageNaturalRatio;
+
+  const [bubbleBox, setBubbleBox] = useState<BubbleBox>(
+    activeTemplate.defaultBox,
+  );
+
+  const selectedLayer = layers.find((item) => item.id === selectedLayerId);
+
+  function readPixelValue(value: string) {
+    const parsed = Number.parseFloat(value.replace("px", ""));
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  function waitForImages(node: HTMLElement) {
+    const images = Array.from(node.querySelectorAll("img"));
+
+    return Promise.all(
+      images.map(
+        (image) =>
+          new Promise<void>((resolve) => {
+            if (image.complete && image.naturalWidth > 0) {
+              resolve();
+              return;
+            }
+
+            image.onload = () => resolve();
+            image.onerror = () => resolve();
+          }),
+      ),
+    );
+  }
+
+  const editorFrameStyle: React.CSSProperties = {
+    outline: exportMode ? "none" : "2px dashed rgba(56,189,248,0.95)",
+    outlineOffset: exportMode ? undefined : "-2px",
+    boxShadow: exportMode
+      ? "none"
+      : "0 0 0 3px rgba(56,189,248,0.24), 0 12px 30px rgba(0,0,0,0.25)",
+  };
+
+  const parentBubbleFrameStyle: React.CSSProperties = {
+    ...editorFrameStyle,
+    borderRadius: 28,
+  };
+
+  const transparentHandleStyle: React.CSSProperties = {
+    background: "transparent",
+    border: "none",
+    boxShadow: "none",
+    zIndex: 80,
+  };
+
+  function getDashedResizeHandleStyles(selected: boolean) {
+    if (!selected || exportMode || backgroundEditMode) {
+      return {
+        top: { ...transparentHandleStyle, height: 0 },
+        right: { ...transparentHandleStyle, width: 0 },
+        bottom: { ...transparentHandleStyle, height: 0 },
+        left: { ...transparentHandleStyle, width: 0 },
+        topLeft: { ...transparentHandleStyle, width: 0, height: 0 },
+        topRight: { ...transparentHandleStyle, width: 0, height: 0 },
+        bottomLeft: { ...transparentHandleStyle, width: 0, height: 0 },
+        bottomRight: { ...transparentHandleStyle, width: 0, height: 0 },
+      };
+    }
+
+    return {
+      top: {
+        ...transparentHandleStyle,
+        height: 18,
+        top: -9,
+        left: 14,
+        right: 14,
+        cursor: "ns-resize",
+      },
+      bottom: {
+        ...transparentHandleStyle,
+        height: 18,
+        bottom: -9,
+        left: 14,
+        right: 14,
+        cursor: "ns-resize",
+      },
+      left: {
+        ...transparentHandleStyle,
+        width: 18,
+        left: -9,
+        top: 14,
+        bottom: 14,
+        cursor: "ew-resize",
+      },
+      right: {
+        ...transparentHandleStyle,
+        width: 18,
+        right: -9,
+        top: 14,
+        bottom: 14,
+        cursor: "ew-resize",
+      },
+      topLeft: {
+        ...transparentHandleStyle,
+        width: 28,
+        height: 28,
+        left: -10,
+        top: -10,
+        cursor: "nwse-resize",
+      },
+      topRight: {
+        ...transparentHandleStyle,
+        width: 28,
+        height: 28,
+        right: -10,
+        top: -10,
+        cursor: "nesw-resize",
+      },
+      bottomLeft: {
+        ...transparentHandleStyle,
+        width: 28,
+        height: 28,
+        left: -10,
+        bottom: -10,
+        cursor: "nesw-resize",
+      },
+      bottomRight: {
+        ...transparentHandleStyle,
+        width: 28,
+        height: 28,
+        right: -10,
+        bottom: -10,
+        cursor: "nwse-resize",
+      },
+    };
+  }
+
+  function handleImageUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string") return;
+
+      const image = new Image();
+
+      image.onload = () => {
+        if (image.width > 0 && image.height > 0) {
+          setImageNaturalRatio(image.width / image.height);
+        }
+
+        setImageTransform({ x: 0, y: 0, scale: 1 });
+        setImageUrl(result);
+        setMobileControlsOpen(false);
+      };
+
+      image.onerror = () => {
+        setImageTransform({ x: 0, y: 0, scale: 1 });
+        setImageUrl(result);
+        setMobileControlsOpen(false);
+      };
+
+      image.src = result;
+    };
+
+    reader.onerror = () => {
+      alert("Không đọc được ảnh. Bạn thử chọn lại ảnh khác.");
+    };
+
+    reader.readAsDataURL(file);
+  }
+
+  function updateContent<K extends keyof BubbleContent>(
+    key: K,
+    value: BubbleContent[K],
+  ) {
+    setContent((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function handleTemplateChange(nextTemplateId: BubbleTemplateId) {
+    const nextTemplate =
+      bubbleTemplates.find((item) => item.id === nextTemplateId) ??
+      bubbleTemplates[0];
+
+    setTemplateId(nextTemplateId);
+    setBubbleBox(nextTemplate.defaultBox);
+
+    const nextLayers = createDefaultDesignLayers(content, nextTemplateId);
+    setLayers(nextLayers);
+
+    const brandLayer = nextLayers.find((item) => item.id === "brand");
+    setSelectedLayerId(brandLayer?.id ?? nextLayers[0]?.id ?? "");
+
+    setFreeEdit(true);
+    setBackgroundEditMode(false);
+  }
+
+  function updateLayer(nextLayer: DesignLayer) {
+    setLayers((prev) =>
+      prev.map((item) => (item.id === nextLayer.id ? nextLayer : item)),
+    );
+  }
+
+  function resetBubblePosition() {
+    setImageTransform({ x: 0, y: 0, scale: 1 });
+
+    if (freeEdit) {
+      const nextLayers = createDefaultDesignLayers(content, templateId);
+      setLayers(nextLayers);
+
+      const brandLayer = nextLayers.find((item) => item.id === "brand");
+      setSelectedLayerId(brandLayer?.id ?? nextLayers[0]?.id ?? "");
+
+      return;
+    }
+
+    setBubbleBox(activeTemplate.defaultBox);
+  }
+
+  function addTextLayer() {
+    const id = `text-${Date.now()}`;
+    const maxZ = Math.max(...layers.map((item) => item.zIndex ?? 1), 1);
+
+    setLayers((prev) => [
+      ...prev,
+      {
+        id,
+        name: "Chữ mới",
+        type: "text",
+        x: 80,
+        y: 120,
+        width: 260,
+        height: 52,
+        zIndex: maxZ + 1,
+        text: "Nhập nội dung",
+        fontSize: 24,
+        fontWeight: 700,
+        color: "#ffffff",
+        textAlign: "center",
+        lineHeight: 1.15,
+        padding: 4,
+      },
+    ]);
+
+    setSelectedLayerId(id);
+    setFreeEdit(true);
+    setBackgroundEditMode(false);
+  }
+
+  function addBoxLayer() {
+    const id = `box-${Date.now()}`;
+    const maxZ = Math.max(...layers.map((item) => item.zIndex ?? 1), 1);
+
+    setLayers((prev) => [
+      ...prev,
+      {
+        id,
+        name: "Nền mới",
+        type: "box",
+        x: 70,
+        y: 100,
+        width: 280,
+        height: 90,
+        zIndex: maxZ + 1,
+        background: "rgba(0,0,0,0.55)",
+        borderRadius: 22,
+        opacity: 1,
+      },
+    ]);
+
+    setSelectedLayerId(id);
+    setFreeEdit(true);
+    setBackgroundEditMode(false);
+  }
+
+  function duplicateLayer(layer: DesignLayer) {
+    const id = `${layer.id}-copy-${Date.now()}`;
+    const maxZ = Math.max(...layers.map((item) => item.zIndex ?? 1), 1);
+
+    setLayers((prev) => [
+      ...prev,
+      {
+        ...layer,
+        id,
+        name: `${layer.name} copy`,
+        x: layer.x + 18,
+        y: layer.y + 18,
+        zIndex: maxZ + 1,
+      },
+    ]);
+
+    setSelectedLayerId(id);
+  }
+
+  function deleteLayer(id: string) {
+    if (layers.length <= 1) return;
+
+    const fallback = layers.find((item) => item.id !== id);
+
+    setLayers((prev) => prev.filter((item) => item.id !== id));
+
+    if (fallback) setSelectedLayerId(fallback.id);
+  }
+
+  function bringForward(id: string) {
+    setLayers((prev) =>
+      prev.map((item) =>
+        item.id === id ? { ...item, zIndex: (item.zIndex ?? 1) + 1 } : item,
+      ),
+    );
+  }
+
+  function sendBackward(id: string) {
+    setLayers((prev) =>
+      prev.map((item) =>
+        item.id === id
+          ? { ...item, zIndex: Math.max(1, (item.zIndex ?? 1) - 1) }
+          : item,
+      ),
+    );
+  }
+
+  function getTouchDistance(touches: React.TouchList) {
+    if (touches.length < 2) return 0;
+
+    const first = touches[0];
+    const second = touches[1];
+
+    return Math.hypot(
+      second.clientX - first.clientX,
+      second.clientY - first.clientY,
+    );
+  }
+
+  function handleBubbleTouchStart(event: React.TouchEvent<HTMLDivElement>) {
+    if (backgroundEditMode) return;
+    if (event.touches.length !== 2) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    bubblePinchRef.current = {
+      startDistance: getTouchDistance(event.touches),
+      startWidth: bubbleBox.width,
+      startHeight: bubbleBox.height,
+    };
+  }
+
+  function handleBubbleTouchMove(event: React.TouchEvent<HTMLDivElement>) {
+    if (backgroundEditMode) return;
+
+    const pinch = bubblePinchRef.current;
+
+    if (!pinch || event.touches.length !== 2) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const currentDistance = getTouchDistance(event.touches);
+    if (!currentDistance || !pinch.startDistance) return;
+
+    const scale = currentDistance / pinch.startDistance;
+
+    setBubbleBox((prev) => ({
+      ...prev,
+      width: Math.max(170, Math.round(pinch.startWidth * scale)),
+      height: Math.max(160, Math.round(pinch.startHeight * scale)),
+    }));
+  }
+
+  function handleBubbleTouchEnd(event: React.TouchEvent<HTMLDivElement>) {
+    if (event.touches.length < 2) {
+      bubblePinchRef.current = null;
+    }
+  }
+
+  function handleLayerTouchStart(
+    event: React.TouchEvent<HTMLDivElement>,
+    layer: DesignLayer,
+  ) {
+    if (backgroundEditMode) return;
+
+    setSelectedLayerId(layer.id);
+
+    if (event.touches.length !== 2) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    pinchRef.current = {
+      layerId: layer.id,
+      startDistance: getTouchDistance(event.touches),
+      startWidth: layer.width,
+      startHeight: layer.height,
+      startFontSize: layer.fontSize,
+    };
+
+    setPinchingLayerId(layer.id);
+  }
+
+  function handleLayerTouchMove(
+    event: React.TouchEvent<HTMLDivElement>,
+    layer: DesignLayer,
+  ) {
+    if (backgroundEditMode) return;
+
+    const pinch = pinchRef.current;
+
+    if (!pinch || pinch.layerId !== layer.id || event.touches.length !== 2) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const currentDistance = getTouchDistance(event.touches);
+    if (!currentDistance || !pinch.startDistance) return;
+
+    const scale = currentDistance / pinch.startDistance;
+
+    const nextLayer: DesignLayer = {
+      ...layer,
+      width: Math.max(28, Math.round(pinch.startWidth * scale)),
+      height: Math.max(14, Math.round(pinch.startHeight * scale)),
+    };
+
+    if (layer.type !== "box" && pinch.startFontSize) {
+      nextLayer.fontSize = Math.max(
+        8,
+        Math.min(130, Math.round(pinch.startFontSize * scale)),
+      );
+    }
+
+    updateLayer(nextLayer);
+  }
+
+  function handleLayerTouchEnd(event: React.TouchEvent<HTMLDivElement>) {
+    if (event.touches.length < 2) {
+      pinchRef.current = null;
+      setPinchingLayerId(null);
+    }
+  }
+
+  function handleBackgroundTouchStart(event: React.TouchEvent<HTMLDivElement>) {
+    if (!backgroundEditMode) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (event.touches.length === 1) {
+      backgroundGestureRef.current = {
+        mode: "pan",
+        startX: event.touches[0].clientX,
+        startY: event.touches[0].clientY,
+        startTransform: imageTransform,
+      };
+    }
+
+    if (event.touches.length === 2) {
+      backgroundGestureRef.current = {
+        mode: "pinch",
+        startDistance: getTouchDistance(event.touches),
+        startTransform: imageTransform,
+      };
+    }
+  }
+
+  function handleBackgroundTouchMove(event: React.TouchEvent<HTMLDivElement>) {
+    if (!backgroundEditMode || !backgroundGestureRef.current) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const gesture = backgroundGestureRef.current;
+
+    if (gesture.mode === "pan" && event.touches.length === 1) {
+      const dx = event.touches[0].clientX - gesture.startX;
+      const dy = event.touches[0].clientY - gesture.startY;
+
+      setImageTransform({
+        ...gesture.startTransform,
+        x: gesture.startTransform.x + dx,
+        y: gesture.startTransform.y + dy,
+      });
+    }
+
+    if (gesture.mode === "pinch" && event.touches.length === 2) {
+      const currentDistance = getTouchDistance(event.touches);
+      if (!currentDistance || !gesture.startDistance) return;
+
+      const scale = currentDistance / gesture.startDistance;
+
+      setImageTransform({
+        ...gesture.startTransform,
+        scale: clampImageScale(gesture.startTransform.scale * scale),
+      });
+    }
+  }
+
+  function handleBackgroundTouchEnd(event: React.TouchEvent<HTMLDivElement>) {
+    if (event.touches.length === 0) {
+      backgroundGestureRef.current = null;
+    }
+  }
+
+  function clampImageScale(value: number) {
+    return Math.max(MIN_IMAGE_SCALE, Math.min(MAX_IMAGE_SCALE, value));
+  }
+
+  function resetImageTransform() {
+    setImageTransform({ x: 0, y: 0, scale: 1 });
+  }
+
+  function openMobileTextEditor() {
+    if (!selectedLayer) {
+      alert("Bạn hãy chọn một element chữ trước.");
+      return;
+    }
+
+    if (selectedLayer.type === "box") {
+      alert("Layer nền không có nội dung chữ để sửa.");
+      return;
+    }
+
+    if (selectedLayer.type === "service-list") {
+      setMobileTextDraft((selectedLayer.services ?? []).join("\n"));
+    } else {
+      setMobileTextDraft(selectedLayer.text ?? "");
+    }
+
+    setMobileTextEditorOpen(true);
+
+    setTimeout(() => {
+      const textarea = document.getElementById("mobile-text-editor-textarea");
+      textarea?.focus();
+    }, 120);
+  }
+
+  function applyMobileTextEdit() {
+    if (!selectedLayer) return;
+
+    if (selectedLayer.type === "service-list") {
+      updateLayer({
+        ...selectedLayer,
+        services: mobileTextDraft
+          .split("\n")
+          .map((item) => item.trim())
+          .filter(Boolean),
+      });
+    } else {
+      updateLayer({
+        ...selectedLayer,
+        text: mobileTextDraft,
+      });
+    }
+
+    setMobileTextEditorOpen(false);
+  }
+
+  async function exportImage() {
+    if (!captureRef.current) {
+      alert("Không tìm thấy khu vực thiết kế để tải ảnh.");
+      return;
+    }
+
+    try {
+      setExportMode(true);
+
+      await new Promise((resolve) => {
+        requestAnimationFrame(() => {
+          setTimeout(resolve, 220);
+        });
+      });
+
+      const node = captureRef.current;
+      await waitForImages(node);
+
+      const currentWidth = node.getBoundingClientRect().width;
+      const pixelRatio = Math.max(2, 2160 / Math.max(currentWidth, 1));
+
+      const blob = await toBlob(node, {
+        cacheBust: true,
+        pixelRatio,
+        backgroundColor: undefined,
+        fontEmbedCSS: "",
+        imagePlaceholder: imageUrl || undefined,
+        filter: (node) => {
+          if (node instanceof HTMLElement) {
+            return node.dataset.exportHidden !== "true";
+          }
+
+          return true;
+        },
+      });
+
+      if (!blob) {
+        throw new Error("Không tạo được file ảnh.");
+      }
+
+      downloadOrPreviewBlob(blob, "sam-bubble-studio-2k.png");
+    } catch (error) {
+      console.error("Export image failed:", error);
+      alert(
+        "Không tải được ảnh. Trên iPhone bạn thử dùng ảnh nhẹ hơn hoặc giảm số layer.",
+      );
+    } finally {
+      setExportMode(false);
+    }
+  }
+
+  function isMobileDevice() {
+    return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+  }
+
+  async function downloadOrPreviewBlob(blob: Blob, fileName: string) {
+    const objectUrl = URL.createObjectURL(blob);
+
+    if (!isMobileDevice()) {
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 3000);
+      return;
+    }
+
+    setExportPreviewUrl(objectUrl);
+    setExportFileName(fileName);
+
+    try {
+      const file = new File([blob], fileName, { type: "image/png" });
+
+      if (
+        navigator.canShare &&
+        navigator.canShare({ files: [file] }) &&
+        navigator.share
+      ) {
+        await navigator.share({
+          files: [file],
+          title: fileName,
+          text: "Ảnh thiết kế từ SAM Bubble Studio",
+        });
+      }
+    } catch (error) {
+      console.warn("Share cancelled or failed:", error);
+    }
+  }
+
+  const canvasEditor = (
+    <div
+      ref={captureRef}
+      className="relative mx-auto w-full overflow-hidden shadow-2xl"
+      style={{
+        maxWidth: mobileCanvasFullscreen
+          ? canvasAspectRatio >= 1
+            ? "100vw"
+            : "min(100vw, 620px)"
+          : canvasAspectRatio >= 1
+            ? 960
+            : 620,
+        aspectRatio: `${canvasAspectRatio}`,
+        backgroundColor: canvasBgColor,
+        touchAction: "none",
+      }}
+    >
+      {imageUrl ? (
+        <div
+          className="absolute inset-0"
+          style={{
+            touchAction: backgroundEditMode ? "none" : "auto",
+            cursor: backgroundEditMode ? "grab" : "default",
+          }}
+          onTouchStart={handleBackgroundTouchStart}
+          onTouchMove={handleBackgroundTouchMove}
+          onTouchEnd={handleBackgroundTouchEnd}
+          onTouchCancel={handleBackgroundTouchEnd}
+        >
+          <img
+            src={imageUrl}
+            alt="Uploaded"
+            className="h-full w-full select-none"
+            draggable={false}
+            style={{
+              display: "block",
+              objectFit: imageFit,
+              transform: `translate3d(${imageTransform.x}px, ${imageTransform.y}px, 0) scale(${imageTransform.scale})`,
+              transformOrigin: "center center",
+              willChange: "transform",
+              pointerEvents: backgroundEditMode ? "auto" : "none",
+            }}
+          />
+        </div>
+      ) : (
+        <div className="absolute inset-0 flex h-full w-full items-center justify-center bg-gradient-to-br from-zinc-200 to-zinc-400 p-8 text-center text-zinc-700">
+          <div>
+            <ImagePlus className="mx-auto mb-3" size={46} />
+            <p className="font-bold">Upload ảnh để bắt đầu</p>
+            <p className="mt-1 text-sm">
+              Chọn 9:16, 16:9, 1:1 hoặc dùng tỉ lệ gốc của ảnh.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {backgroundEditMode && !exportMode && (
+        <div
+          className="pointer-events-none absolute inset-0 z-[60]"
+          style={{
+            outline: "2px dashed rgba(52,211,153,0.95)",
+            outlineOffset: "-4px",
+            boxShadow: "inset 0 0 0 9999px rgba(16,185,129,0.035)",
+          }}
+        />
+      )}
+
+      {freeEdit ? (
+  [...layers]
+    .sort((a, b) => (a.zIndex ?? 1) - (b.zIndex ?? 1))
+    .map((layer) => {
+      const selected = selectedLayerId === layer.id;
+
+      return (
+        <Rnd
+          key={layer.id}
+          bounds="parent"
+          size={{
+            width: layer.width,
+            height: layer.height,
+          }}
+          position={{
+            x: layer.x,
+            y: layer.y,
+          }}
+          onMouseDown={() => setSelectedLayerId(layer.id)}
+          onPointerDown={() => setSelectedLayerId(layer.id)}
+          onTouchStart={(event:any) => handleLayerTouchStart(event, layer)}
+          onTouchMove={(event:any) => handleLayerTouchMove(event, layer)}
+          onTouchEnd={handleLayerTouchEnd}
+          onTouchCancel={handleLayerTouchEnd}
+          onDragStart={() => setSelectedLayerId(layer.id)}
+          onDrag={(_, data) =>
+            updateLayer({
+              ...layer,
+              x: data.x,
+              y: data.y,
+            })
+          }
+          onDragStop={(_, data) =>
+            updateLayer({
+              ...layer,
+              x: data.x,
+              y: data.y,
+            })
+          }
+          onResizeStart={() => setSelectedLayerId(layer.id)}
+          onResize={(_, __, ref, ___, position) => {
+            updateLayer({
+              ...layer,
+              width: readPixelValue(ref.style.width),
+              height: readPixelValue(ref.style.height),
+              x: position.x,
+              y: position.y,
+            });
+          }}
+          onResizeStop={(_, __, ref, ___, position) => {
+            updateLayer({
+              ...layer,
+              width: readPixelValue(ref.style.width),
+              height: readPixelValue(ref.style.height),
+              x: position.x,
+              y: position.y,
+            });
+          }}
+          minWidth={28}
+          minHeight={14}
+          enableUserSelectHack={false}
+          disableDragging={backgroundEditMode || pinchingLayerId === layer.id}
+          className="select-none"
+          style={{
+            zIndex: layer.zIndex ?? 1,
+            touchAction: 'none',
+            pointerEvents: backgroundEditMode ? 'none' : 'auto',
+          }}
+          enableResizing={
+            selected && !backgroundEditMode
+              ? {
+                  top: true,
+                  right: true,
+                  bottom: true,
+                  left: true,
+                  topLeft: true,
+                  topRight: true,
+                  bottomLeft: true,
+                  bottomRight: true,
+                }
+              : false
+          }
+          resizeHandleStyles={getDashedResizeHandleStyles(selected)}
+        >
+          <LayerRenderer
+            layer={layer}
+            selected={selected}
+            exportMode={exportMode}
+            showFrame={showLayerFrames}
+            onClick={() => setSelectedLayerId(layer.id)}
+          />
+        </Rnd>
+      );
+    })
+      ) : (
+        <Rnd
+          bounds="parent"
+          size={{
+            width: bubbleBox.width,
+            height: bubbleBox.height,
+          }}
+          position={{
+            x: bubbleBox.x,
+            y: bubbleBox.y,
+          }}
+          onTouchStart={handleBubbleTouchStart}
+          onTouchMove={handleBubbleTouchMove}
+          onTouchEnd={handleBubbleTouchEnd}
+          onTouchCancel={handleBubbleTouchEnd}
+          onDrag={(_, data) =>
+            setBubbleBox((prev) => ({
+              ...prev,
+              x: data.x,
+              y: data.y,
+            }))
+          }
+          onDragStop={(_, data) =>
+            setBubbleBox((prev) => ({
+              ...prev,
+              x: data.x,
+              y: data.y,
+            }))
+          }
+          onResize={(_, __, ref, ___, position) => {
+            setBubbleBox({
+              width: readPixelValue(ref.style.width),
+              height: readPixelValue(ref.style.height),
+              x: position.x,
+              y: position.y,
+            });
+          }}
+          onResizeStop={(_, __, ref, ___, position) => {
+            setBubbleBox({
+              width: readPixelValue(ref.style.width),
+              height: readPixelValue(ref.style.height),
+              x: position.x,
+              y: position.y,
+            });
+          }}
+          minWidth={170}
+          minHeight={160}
+          enableUserSelectHack={false}
+          className="select-none"
+          style={{
+            touchAction: 'none',
+            pointerEvents: backgroundEditMode ? 'none' : 'auto',
+            ...(!backgroundEditMode ? parentBubbleFrameStyle : {}),
+          }}
+          enableResizing={
+            backgroundEditMode
+              ? false
+              : {
+                  top: true,
+                  right: true,
+                  bottom: true,
+                  left: true,
+                  topLeft: true,
+                  topRight: true,
+                  bottomLeft: true,
+                  bottomRight: true,
+                }
+          }
+          resizeHandleStyles={getDashedResizeHandleStyles(!backgroundEditMode)}
+        >
+          <BubbleRenderer
+            templateId={templateId}
+            content={content}
+            opacity={opacity}
+            accentColor={accentColor}
+          />
+        </Rnd>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-[#f5f1ea] text-zinc-950">
+      <div className="mx-auto max-w-[1800px] px-3 py-4 pb-24 lg:px-6 lg:py-8 lg:pb-10">
+        <header className="mb-4 rounded-[28px] bg-white/80 p-4 shadow-sm backdrop-blur lg:p-6">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-[0.28em] text-zinc-500">
+                SAM Bubble Studio
+              </p>
+
+              <h1 className="mt-2 text-2xl font-black tracking-tight md:text-5xl">
+                Thiết kế bubble quảng cáo trên ảnh
+              </h1>
+
+              <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-600 md:text-base">
+                Upload ảnh, chọn template, chỉnh từng element, zoom ảnh nền và
+                tải ảnh 2K.
+              </p>
+            </div>
+
+            <a
+              href="/admin"
+              className="hidden rounded-2xl bg-zinc-950 px-5 py-3 text-sm font-bold text-white shadow-sm hover:bg-zinc-800 md:block"
+            >
+              Admin nội dung
+            </a>
+          </div>
+        </header>
+
+        <div className="mb-4 rounded-[28px] bg-white p-3 shadow-sm lg:p-4">
+          <TemplatePicker
+            activeTemplate={templateId}
+            onChange={handleTemplateChange}
+          />
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-[360px_minmax(520px,1fr)_380px]">
+          <aside className="hidden xl:block">
+            <div className="sticky top-4 space-y-4">
+              <EditorControls
+                content={content}
+                opacity={opacity}
+                accentColor={accentColor}
+                onImageUpload={handleImageUpload}
+                onExport={exportImage}
+                onResetBox={resetBubblePosition}
+                onOpacityChange={setOpacity}
+                onAccentColorChange={setAccentColor}
+                onContentChange={updateContent}
+              />
+
+              <CanvasSettingPanel
+                canvasRatioId={canvasRatioId}
+                imageFit={imageFit}
+                canvasBgColor={canvasBgColor}
+                imageTransform={imageTransform}
+                backgroundEditMode={backgroundEditMode}
+                onCanvasRatioChange={setCanvasRatioId}
+                onImageFitChange={setImageFit}
+                onCanvasBgColorChange={setCanvasBgColor}
+                onImageScaleChange={(scale) =>
+                  setImageTransform((prev) => ({
+                    ...prev,
+                    scale: clampImageScale(scale),
+                  }))
+                }
+                onBackgroundEditModeChange={setBackgroundEditMode}
+                onResetImageTransform={resetImageTransform}
+                onExport2K={exportImage}
+              />
+            </div>
+          </aside>
+
+          <main className="min-w-0 rounded-[28px] bg-white p-3 shadow-sm lg:p-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-bold">Khu vực thiết kế</p>
+                <p className="text-xs text-zinc-500">
+                  {backgroundEditMode
+                    ? "Đang chỉnh ảnh nền: kéo ảnh hoặc chụm 2 ngón để zoom."
+                    : freeEdit
+                      ? "Đang chỉnh element: kéo layer, kéo mép dashed để resize."
+                      : "Kéo bubble để đổi vị trí, kéo mép dashed để resize."}
+                </p>
+              </div>
+
+              <button
+                onClick={() => setMobileControlsOpen(true)}
+                className="flex items-center gap-2 rounded-xl bg-zinc-950 px-3 py-2 text-xs font-bold text-white lg:hidden"
+              >
+                <Menu size={16} /> Công cụ
+              </button>
+            </div>
+
+            <div className="overflow-auto rounded-[24px] bg-zinc-950 p-2 sm:p-4">
+              {!mobileCanvasFullscreen && canvasEditor}
+            </div>
+          </main>
+
+          <aside className="hidden xl:block">
+            <div className="sticky top-4 max-h-[calc(100vh-32px)] overflow-y-auto pr-1">
+              <FreeEditTools
+                freeEdit={freeEdit}
+                showLayerFrames={showLayerFrames}
+                onFreeEditChange={(value) => {
+                  setFreeEdit(value);
+                  if (value) setBackgroundEditMode(false);
+                }}
+                onShowLayerFramesChange={setShowLayerFrames}
+                layers={layers}
+                selectedLayerId={selectedLayerId}
+                selectedLayer={selectedLayer}
+                onSelectLayer={setSelectedLayerId}
+                onAddText={addTextLayer}
+                onAddBox={addBoxLayer}
+                onUpdateLayer={updateLayer}
+                onDeleteLayer={deleteLayer}
+                onDuplicateLayer={duplicateLayer}
+                onBringForward={bringForward}
+                onSendBackward={sendBackward}
+              />
+            </div>
+          </aside>
+        </div>
+      </div>
+
+      <div
+        className="fixed inset-x-0 bottom-0 z-40 border-t border-zinc-200 bg-white/95 p-3 shadow-2xl backdrop-blur lg:hidden"
+        data-export-hidden="true"
+      >
+        <div className="mx-auto grid max-w-[520px] grid-cols-4 gap-2">
+          <label className="flex cursor-pointer items-center justify-center rounded-2xl bg-zinc-100 px-2 py-2 text-xs font-bold">
+            Upload
+            <input
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handleImageUpload}
+            />
+          </label>
+
+          <button
+            onClick={resetBubblePosition}
+            className="rounded-2xl bg-zinc-100 px-2 py-2 text-xs font-bold"
+          >
+            Reset
+          </button>
+
+          <button
+            onClick={() => setMobileCanvasFullscreen(true)}
+            className="rounded-2xl bg-zinc-100 px-2 py-2 text-xs font-bold"
+          >
+            Zoom
+          </button>
+
+          <button
+            onClick={exportImage}
+            className="rounded-2xl bg-zinc-950 px-2 py-2 text-xs font-bold text-white"
+          >
+            Tải 2K
+          </button>
+        </div>
+      </div>
+
+      {mobileCanvasFullscreen && (
+        <div
+          className="fixed inset-0 z-[60] flex flex-col bg-zinc-950 lg:hidden"
+          data-export-hidden="true"
+        >
+          <div className="flex items-center justify-between border-b border-white/10 bg-zinc-950 px-3 py-3 text-white">
+            <div>
+              <p className="text-sm font-bold">Chỉnh sửa fullscreen</p>
+              <p className="text-[11px] text-white/55">
+                Element: kéo/chụm layer. Ảnh nền: kéo/chụm ảnh phía sau.
+              </p>
+            </div>
+
+            <button
+              onClick={() => setMobileCanvasFullscreen(false)}
+              className="rounded-xl bg-white/10 px-3 py-2 text-xs font-bold"
+            >
+              Đóng
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-auto p-2">
+            <div className="flex min-h-full items-center justify-center">
+              {canvasEditor}
+            </div>
+          </div>
+
+          <div className="flex gap-2 overflow-x-auto border-t border-white/10 bg-zinc-950 p-2 text-xs font-bold">
+            <button
+              onClick={() => {
+                setFreeEdit(true);
+                setBackgroundEditMode(false);
+              }}
+              className={[
+                "shrink-0 rounded-xl px-4 py-3",
+                freeEdit && !backgroundEditMode
+                  ? "bg-[#d8bd7f] text-black"
+                  : "bg-white/10 text-white",
+              ].join(" ")}
+            >
+              Element
+            </button>
+
+            <button
+              onClick={() => {
+                setBackgroundEditMode((prev) => !prev);
+                setFreeEdit(true);
+              }}
+              className={[
+                "shrink-0 rounded-xl px-4 py-3",
+                backgroundEditMode
+                  ? "bg-emerald-400 text-black"
+                  : "bg-white/10 text-white",
+              ].join(" ")}
+            >
+              Ảnh nền
+            </button>
+
+            <button
+              onClick={openMobileTextEditor}
+              className="shrink-0 rounded-xl bg-white/10 px-4 py-3 text-white"
+            >
+              Sửa chữ
+            </button>
+
+            <button
+              onClick={() => setShowLayerFrames((prev) => !prev)}
+              className={[
+                "shrink-0 rounded-xl px-4 py-3",
+                showLayerFrames
+                  ? "bg-sky-400 text-black"
+                  : "bg-white/10 text-white",
+              ].join(" ")}
+            >
+              Khung
+            </button>
+
+            <button
+              onClick={() => setMobileControlsOpen(true)}
+              className="shrink-0 rounded-xl bg-white/10 px-4 py-3 text-white"
+            >
+              Công cụ
+            </button>
+
+            <button
+              onClick={exportImage}
+              className="shrink-0 rounded-xl bg-white px-4 py-3 text-black"
+            >
+              Tải 2K
+            </button>
+          </div>
+        </div>
+      )}
+
+      {mobileControlsOpen && (
+        <div
+          className="fixed inset-0 z-[70] bg-black/45 p-3 lg:hidden"
+          data-export-hidden="true"
+        >
+          <div className="ml-auto flex h-full max-w-[420px] flex-col rounded-[28px] bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b p-4">
+              <p className="font-bold">Công cụ chỉnh sửa</p>
+
+              <button
+                onClick={() => setMobileControlsOpen(false)}
+                className="rounded-xl bg-zinc-100 p-2"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="flex-1 space-y-4 overflow-auto p-3">
+              <EditorControls
+                content={content}
+                opacity={opacity}
+                accentColor={accentColor}
+                onImageUpload={handleImageUpload}
+                onExport={exportImage}
+                onResetBox={resetBubblePosition}
+                onOpacityChange={setOpacity}
+                onAccentColorChange={setAccentColor}
+                onContentChange={updateContent}
+              />
+
+              <CanvasSettingPanel
+                canvasRatioId={canvasRatioId}
+                imageFit={imageFit}
+                canvasBgColor={canvasBgColor}
+                imageTransform={imageTransform}
+                backgroundEditMode={backgroundEditMode}
+                onCanvasRatioChange={setCanvasRatioId}
+                onImageFitChange={setImageFit}
+                onCanvasBgColorChange={setCanvasBgColor}
+                onImageScaleChange={(scale) =>
+                  setImageTransform((prev) => ({
+                    ...prev,
+                    scale: clampImageScale(scale),
+                  }))
+                }
+                onBackgroundEditModeChange={setBackgroundEditMode}
+                onResetImageTransform={resetImageTransform}
+                onExport2K={exportImage}
+              />
+
+              <FreeEditTools
+                freeEdit={freeEdit}
+                showLayerFrames={showLayerFrames}
+                onFreeEditChange={(value) => {
+                  setFreeEdit(value);
+                  if (value) setBackgroundEditMode(false);
+                }}
+                onShowLayerFramesChange={setShowLayerFrames}
+                layers={layers}
+                selectedLayerId={selectedLayerId}
+                selectedLayer={selectedLayer}
+                onSelectLayer={setSelectedLayerId}
+                onAddText={addTextLayer}
+                onAddBox={addBoxLayer}
+                onUpdateLayer={updateLayer}
+                onDeleteLayer={deleteLayer}
+                onDuplicateLayer={duplicateLayer}
+                onBringForward={bringForward}
+                onSendBackward={sendBackward}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mobileTextEditorOpen && (
+        <div
+          className="fixed inset-0 z-[95] flex items-end bg-black/50 p-3 lg:hidden"
+          data-export-hidden="true"
+        >
+          <div className="w-full rounded-[28px] bg-white p-4 shadow-2xl">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <p className="font-bold">Sửa nội dung</p>
+                <p className="text-xs text-zinc-500">
+                  {selectedLayer?.name ?? "Element đang chọn"}
+                </p>
+              </div>
+
+              <button
+                onClick={() => setMobileTextEditorOpen(false)}
+                className="rounded-xl bg-zinc-100 px-3 py-2 text-xs font-bold"
+              >
+                Đóng
+              </button>
+            </div>
+
+            <textarea
+              id="mobile-text-editor-textarea"
+              value={mobileTextDraft}
+              onChange={(event) => setMobileTextDraft(event.target.value)}
+              rows={8}
+              className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-base outline-none focus:border-zinc-950"
+              placeholder="Nhập nội dung..."
+            />
+
+            <button
+              onClick={applyMobileTextEdit}
+              className="mt-3 w-full rounded-2xl bg-zinc-950 px-4 py-3 text-sm font-bold text-white"
+            >
+              Áp dụng
+            </button>
+          </div>
+        </div>
+      )}
+
+      {exportPreviewUrl && (
+        <div
+          className="fixed inset-0 z-[90] flex items-center justify-center bg-black/70 p-4"
+          data-export-hidden="true"
+        >
+          <div className="flex max-h-full w-full max-w-[520px] flex-col overflow-hidden rounded-[28px] bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b p-4">
+              <div>
+                <p className="font-bold">Ảnh đã tạo xong</p>
+                <p className="text-xs text-zinc-500">{exportFileName}</p>
+              </div>
+
+              <button
+                onClick={() => {
+                  URL.revokeObjectURL(exportPreviewUrl);
+                  setExportPreviewUrl("");
+                  setExportFileName("");
+                }}
+                className="rounded-xl bg-zinc-100 px-3 py-2 text-xs font-bold"
+              >
+                Đóng
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto bg-zinc-950 p-3">
+              <img
+                src={exportPreviewUrl}
+                alt="Export preview"
+                className="mx-auto h-auto max-w-full rounded-xl"
+              />
+            </div>
+
+            <div className="space-y-3 border-t p-4">
+              <p className="text-sm leading-relaxed text-zinc-600">
+                Trên iPhone, nếu ảnh chưa tự lưu, hãy nhấn giữ vào ảnh rồi chọn
+                <b> Lưu vào Ảnh</b> hoặc <b>Save Image</b>.
+              </p>
+
+              <div className="grid grid-cols-2 gap-2">
+                <a
+                  href={exportPreviewUrl}
+                  download={exportFileName}
+                  className="rounded-2xl bg-zinc-100 px-4 py-3 text-center text-sm font-bold"
+                >
+                  Tải lại
+                </a>
+
+                <button
+                  onClick={async () => {
+                    try {
+                      const response = await fetch(exportPreviewUrl);
+                      const blob = await response.blob();
+                      const file = new File(
+                        [blob],
+                        exportFileName || "design.png",
+                        { type: "image/png" },
+                      );
+
+                      if (
+                        navigator.canShare &&
+                        navigator.canShare({ files: [file] }) &&
+                        navigator.share
+                      ) {
+                        await navigator.share({
+                          files: [file],
+                          title: exportFileName,
+                        });
+                      } else {
+                        alert(
+                          "Trình duyệt không hỗ trợ chia sẻ trực tiếp. Bạn nhấn giữ ảnh để lưu.",
+                        );
+                      }
+                    } catch (error) {
+                      console.error(error);
+                      alert("Không mở được chia sẻ. Bạn nhấn giữ ảnh để lưu.");
+                    }
+                  }}
+                  className="rounded-2xl bg-zinc-950 px-4 py-3 text-sm font-bold text-white"
+                >
+                  Chia sẻ/Lưu
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CanvasSettingPanel({
+  canvasRatioId,
+  imageFit,
+  canvasBgColor,
+  imageTransform,
+  backgroundEditMode,
+  onCanvasRatioChange,
+  onImageFitChange,
+  onCanvasBgColorChange,
+  onImageScaleChange,
+  onBackgroundEditModeChange,
+  onResetImageTransform,
+  onExport2K,
+}: {
+  canvasRatioId: CanvasRatioId;
+  imageFit: ImageFit;
+  canvasBgColor: string;
+  imageTransform: ImageTransform;
+  backgroundEditMode: boolean;
+  onCanvasRatioChange: (value: CanvasRatioId) => void;
+  onImageFitChange: (value: ImageFit) => void;
+  onCanvasBgColorChange: (value: string) => void;
+  onImageScaleChange: (value: number) => void;
+  onBackgroundEditModeChange: (value: boolean) => void;
+  onResetImageTransform: () => void;
+  onExport2K: () => void;
+}) {
+  return (
+    <div className="space-y-4 rounded-[28px] bg-white p-4 shadow-sm">
+      <div>
+        <p className="text-sm font-bold">Tỉ lệ & ảnh nền</p>
+        <p className="mt-1 text-xs leading-relaxed text-zinc-500">
+          Chọn tỉ lệ canvas, chỉnh ảnh nền, zoom/pan ảnh upload.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        {ratioOptions.map((item) => {
+          const active = canvasRatioId === item.id;
+
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => onCanvasRatioChange(item.id)}
+              className={[
+                "rounded-2xl border px-3 py-2 text-left transition",
+                active
+                  ? "border-zinc-950 bg-zinc-950 text-white"
+                  : "border-zinc-200 bg-zinc-50 hover:border-zinc-950",
+              ].join(" ")}
+            >
+              <p className="text-sm font-black">{item.label}</p>
+              <p
+                className={[
+                  "mt-0.5 text-[11px]",
+                  active ? "text-white/65" : "text-zinc-500",
+                ].join(" ")}
+              >
+                {item.description}
+              </p>
+            </button>
+          );
+        })}
+      </div>
+
+      <div>
+        <label className="mb-1 block text-xs font-bold">Hiển thị ảnh</label>
+
+        <select
+          value={imageFit}
+          onChange={(event) => onImageFitChange(event.target.value as ImageFit)}
+          className="w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-950"
+        >
+          <option value="contain">Không cắt ảnh - hiển thị đầy đủ</option>
+          <option value="cover">Phủ kín khung - có thể bị crop</option>
+        </select>
+      </div>
+
+      <label className="flex items-center justify-between rounded-2xl bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-950">
+        <span>Chỉnh ảnh nền</span>
+
+        <input
+          type="checkbox"
+          checked={backgroundEditMode}
+          onChange={(event) => onBackgroundEditModeChange(event.target.checked)}
+          className="h-5 w-5 accent-emerald-500"
+        />
+      </label>
+
+      <div>
+        <div className="mb-1 flex items-center justify-between">
+          <label className="text-xs font-bold">Zoom ảnh nền</label>
+          <span className="text-xs text-zinc-500">
+            {imageTransform.scale.toFixed(2)}x
+          </span>
+        </div>
+
+        <input
+          type="range"
+          min={MIN_IMAGE_SCALE}
+          max={MAX_IMAGE_SCALE}
+          step={0.01}
+          value={imageTransform.scale}
+          onChange={(event) => onImageScaleChange(Number(event.target.value))}
+          className="w-full"
+        />
+      </div>
+
+      <div>
+        <label className="mb-1 block text-xs font-bold">Màu nền canvas</label>
+
+        <input
+          type="color"
+          value={canvasBgColor}
+          onChange={(event) => onCanvasBgColorChange(event.target.value)}
+          className="h-10 w-full rounded-xl border"
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={onResetImageTransform}
+          className="rounded-xl bg-zinc-100 px-3 py-3 text-xs font-bold text-zinc-950"
+        >
+          Reset ảnh nền
+        </button>
+
+        <button
+          type="button"
+          onClick={onExport2K}
+          className="rounded-xl bg-zinc-950 px-3 py-3 text-xs font-bold text-white"
+        >
+          Tải 2K
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FreeEditTools({
+  freeEdit,
+  showLayerFrames,
+  onFreeEditChange,
+  onShowLayerFramesChange,
+  layers,
+  selectedLayerId,
+  selectedLayer,
+  onSelectLayer,
+  onAddText,
+  onAddBox,
+  onUpdateLayer,
+  onDeleteLayer,
+  onDuplicateLayer,
+  onBringForward,
+  onSendBackward,
+}: {
+  freeEdit: boolean;
+  showLayerFrames: boolean;
+  onFreeEditChange: (value: boolean) => void;
+  onShowLayerFramesChange: (value: boolean) => void;
+  layers: DesignLayer[];
+  selectedLayerId: string;
+  selectedLayer?: DesignLayer;
+  onSelectLayer: (id: string) => void;
+  onAddText: () => void;
+  onAddBox: () => void;
+  onUpdateLayer: (layer: DesignLayer) => void;
+  onDeleteLayer: (id: string) => void;
+  onDuplicateLayer: (layer: DesignLayer) => void;
+  onBringForward: (id: string) => void;
+  onSendBackward: (id: string) => void;
+}) {
+  return (
+    <div className="space-y-4 rounded-[28px] bg-white p-4 shadow-sm lg:sticky lg:top-4">
+      <div className="rounded-2xl bg-zinc-950 p-4 text-white">
+        <label className="flex items-center justify-between gap-3 text-sm font-bold">
+          <span>Chỉnh từng element</span>
+
+          <input
+            type="checkbox"
+            checked={freeEdit}
+            onChange={(event) => onFreeEditChange(event.target.checked)}
+            className="h-5 w-5 accent-[#d8bd7f]"
+          />
+        </label>
+
+        <p className="mt-2 text-xs leading-relaxed text-white/65">
+          Bật để kéo từng chữ/nền/dịch vụ. Resize bằng mép khung dashed, không
+          dùng chấm xanh.
+        </p>
+      </div>
+
+      {freeEdit && (
+        <>
+          <label className="flex items-center justify-between rounded-2xl bg-sky-50 px-4 py-3 text-sm font-bold text-sky-950">
+            <span>Hiện khung element</span>
+
+            <input
+              type="checkbox"
+              checked={showLayerFrames}
+              onChange={(event) =>
+                onShowLayerFramesChange(event.target.checked)
+              }
+              className="h-5 w-5 accent-sky-500"
+            />
+          </label>
+
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={onAddText}
+              className="flex items-center justify-center gap-2 rounded-xl bg-zinc-100 px-3 py-3 text-xs font-bold hover:bg-zinc-200"
+            >
+              <Type size={15} /> Thêm chữ
+            </button>
+
+            <button
+              type="button"
+              onClick={onAddBox}
+              className="flex items-center justify-center gap-2 rounded-xl bg-zinc-100 px-3 py-3 text-xs font-bold hover:bg-zinc-200"
+            >
+              <Plus size={15} /> Thêm nền
+            </button>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-bold">Chọn layer</label>
+
+            <select
+              value={selectedLayerId}
+              onChange={(event) => onSelectLayer(event.target.value)}
+              className="w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-950"
+            >
+              {[...layers]
+                .sort((a, b) => (a.zIndex ?? 1) - (b.zIndex ?? 1))
+                .map((layer) => (
+                  <option key={layer.id} value={layer.id}>
+                    {layer.name}
+                  </option>
+                ))}
+            </select>
+          </div>
+
+          <LayerSettingPanel
+            layer={selectedLayer}
+            onChange={onUpdateLayer}
+            onDelete={onDeleteLayer}
+            onDuplicate={onDuplicateLayer}
+            onBringForward={onBringForward}
+            onSendBackward={onSendBackward}
+          />
+        </>
+      )}
+    </div>
+  );
+}

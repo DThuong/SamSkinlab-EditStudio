@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Rnd } from "react-rnd";
 import { toBlob } from "html-to-image";
 import { ImagePlus, Menu, Plus, Type, X } from "lucide-react";
-import BubbleRenderer from "../components/BubbleRenderer";
 import EditorControls from "../components/EditorControls";
 import TemplatePicker from "../components/TemplatePicker";
 import { bubbleTemplates } from "../data/bubbleTemplates";
@@ -104,6 +103,7 @@ type SavedDesignState = {
   layers: DesignLayer[];
   selectedLayerId: string;
   bubbleBox: BubbleBox;
+  parentEditBaseBox?: BubbleBox | null;
   savedAt: string;
 };
 
@@ -169,6 +169,7 @@ export default function DesignPage() {
   const [mobileTextDraft, setMobileTextDraft] = useState("");
 
   const [freeEdit, setFreeEdit] = useState(false);
+  const [parentEditBaseBox, setParentEditBaseBox] = useState<BubbleBox | null>(null);
   const [backgroundEditMode, setBackgroundEditMode] = useState(false);
   const [showLayerFrames, setShowLayerFrames] = useState(true);
   const [layers, setLayers] = useState<DesignLayer[]>(() =>
@@ -226,6 +227,7 @@ export default function DesignPage() {
     );
     setSelectedLayerId(saved.selectedLayerId ?? "brand");
     setBubbleBox(saved.bubbleBox ?? activeTemplate.defaultBox);
+    setParentEditBaseBox(saved.parentEditBaseBox ?? null);
   }, []);
 
   const selectedLayer = layers.find((item) => item.id === selectedLayerId);
@@ -748,6 +750,84 @@ export default function DesignPage() {
     setImageTransform({ x: 0, y: 0, scale: 1 });
   }
 
+
+  function getLayersBoundingBox(sourceLayers = layers): BubbleBox {
+    if (!sourceLayers.length) return activeTemplate.defaultBox;
+
+    const minX = Math.min(...sourceLayers.map((layer) => layer.x));
+    const minY = Math.min(...sourceLayers.map((layer) => layer.y));
+    const maxX = Math.max(...sourceLayers.map((layer) => layer.x + layer.width));
+    const maxY = Math.max(...sourceLayers.map((layer) => layer.y + layer.height));
+
+    return {
+      x: Math.round(minX),
+      y: Math.round(minY),
+      width: Math.max(40, Math.round(maxX - minX)),
+      height: Math.max(40, Math.round(maxY - minY)),
+    };
+  }
+
+  function scaleLayerFromBaseBox(
+    layer: DesignLayer,
+    baseBox: BubbleBox,
+    targetBox: BubbleBox,
+    absolutePosition = true,
+  ): DesignLayer {
+    const scaleX = targetBox.width / Math.max(baseBox.width, 1);
+    const scaleY = targetBox.height / Math.max(baseBox.height, 1);
+    const fontScale = (scaleX + scaleY) / 2;
+
+    return {
+      ...layer,
+      x: Math.round(
+        (absolutePosition ? targetBox.x : 0) + (layer.x - baseBox.x) * scaleX,
+      ),
+      y: Math.round(
+        (absolutePosition ? targetBox.y : 0) + (layer.y - baseBox.y) * scaleY,
+      ),
+      width: Math.max(8, Math.round(layer.width * scaleX)),
+      height: Math.max(8, Math.round(layer.height * scaleY)),
+      fontSize: layer.fontSize
+        ? Math.max(6, Math.round(layer.fontSize * fontScale))
+        : layer.fontSize,
+      padding: layer.padding
+        ? Math.max(0, Math.round(layer.padding * fontScale))
+        : layer.padding,
+      borderRadius: layer.borderRadius
+        ? Math.max(0, Math.round(layer.borderRadius * fontScale))
+        : layer.borderRadius,
+    };
+  }
+
+  function commitParentBoxToLayers() {
+    if (!parentEditBaseBox) return;
+
+    setLayers((prev) =>
+      prev.map((layer) =>
+        scaleLayerFromBaseBox(layer, parentEditBaseBox, bubbleBox, true),
+      ),
+    );
+
+    setParentEditBaseBox(null);
+  }
+
+  function handleFreeEditModeChange(nextValue: boolean) {
+    setEditingLayerId(null);
+
+    if (nextValue) {
+      commitParentBoxToLayers();
+      setFreeEdit(true);
+      setBackgroundEditMode(false);
+      return;
+    }
+
+    const nextBaseBox = getLayersBoundingBox();
+    setParentEditBaseBox(nextBaseBox);
+    setBubbleBox(nextBaseBox);
+    setFreeEdit(false);
+    setBackgroundEditMode(false);
+  }
+
   function openMobileTextEditor() {
     if (!selectedLayer) {
       alert("Bạn hãy chọn một element chữ trước.");
@@ -862,6 +942,7 @@ export default function DesignPage() {
       layers,
       selectedLayerId,
       bubbleBox,
+      parentEditBaseBox,
       savedAt: new Date().toISOString(),
     };
 
@@ -883,16 +964,33 @@ export default function DesignPage() {
     const cssWidth = rect.width;
     const cssHeight = rect.height;
 
+    function hasExportFlagInsideCapture(
+      target: HTMLElement,
+      selector: string,
+    ) {
+      let current: HTMLElement | null = target;
+
+      while (current && current !== node) {
+        if (current.matches(selector)) return true;
+        current = current.parentElement;
+      }
+
+      return false;
+    }
+
     const overlayBlob = await toBlob(node, {
       cacheBust: true,
       pixelRatio,
       backgroundColor: "rgba(255,255,255,0)",
       fontEmbedCSS: "",
-      filter: (node) => {
-        if (node instanceof HTMLElement) {
+      filter: (targetNode) => {
+        if (targetNode instanceof HTMLElement) {
           return (
-            !node.closest('[data-export-hidden="true"]') &&
-            !node.closest('[data-export-bg="true"]')
+            !hasExportFlagInsideCapture(
+              targetNode,
+              '[data-export-hidden="true"]',
+            ) &&
+            !hasExportFlagInsideCapture(targetNode, '[data-export-bg="true"]')
           );
         }
 
@@ -1305,22 +1403,40 @@ export default function DesignPage() {
           }
           resizeHandleStyles={getDashedResizeHandleStyles(!backgroundEditMode)}
         >
-          <div
-            className="origin-top-left"
-            style={{
-              width: parentBubbleBaseBox.width,
-              height: parentBubbleBaseBox.height,
-              transform: `scale(${parentBubbleScaleX}, ${parentBubbleScaleY})`,
-              transformOrigin: "top left",
-              pointerEvents: "none",
-            }}
-          >
-            <BubbleRenderer
-              templateId={templateId}
-              content={content}
-              opacity={opacity}
-              accentColor={accentColor}
-            />
+          <div className="relative h-full w-full" style={{ pointerEvents: "none" }}>
+            {[...layers]
+              .sort((a, b) => (a.zIndex ?? 1) - (b.zIndex ?? 1))
+              .map((layer) => {
+                const baseBox = parentEditBaseBox ?? getLayersBoundingBox(layers);
+                const previewLayer = scaleLayerFromBaseBox(
+                  layer,
+                  baseBox,
+                  bubbleBox,
+                  false,
+                );
+
+                return (
+                  <div
+                    key={layer.id}
+                    className="absolute"
+                    style={{
+                      left: previewLayer.x,
+                      top: previewLayer.y,
+                      width: previewLayer.width,
+                      height: previewLayer.height,
+                      zIndex: previewLayer.zIndex ?? 1,
+                    }}
+                  >
+                    <LayerRenderer
+                      layer={previewLayer}
+                      selected={false}
+                      exportMode={exportMode}
+                      showFrame={false}
+                      onClick={() => undefined}
+                    />
+                  </div>
+                );
+              })}
           </div>
         </Rnd>
       )}
@@ -1431,10 +1547,7 @@ export default function DesignPage() {
               <FreeEditTools
                 freeEdit={freeEdit}
                 showLayerFrames={showLayerFrames}
-                onFreeEditChange={(value) => {
-                  setFreeEdit(value);
-                  if (value) setBackgroundEditMode(false);
-                }}
+                onFreeEditChange={handleFreeEditModeChange}
                 onShowLayerFramesChange={setShowLayerFrames}
                 layers={layers}
                 selectedLayerId={selectedLayerId}
@@ -1652,10 +1765,7 @@ export default function DesignPage() {
               <FreeEditTools
                 freeEdit={freeEdit}
                 showLayerFrames={showLayerFrames}
-                onFreeEditChange={(value) => {
-                  setFreeEdit(value);
-                  if (value) setBackgroundEditMode(false);
-                }}
+                onFreeEditChange={handleFreeEditModeChange}
                 onShowLayerFramesChange={setShowLayerFrames}
                 layers={layers}
                 selectedLayerId={selectedLayerId}

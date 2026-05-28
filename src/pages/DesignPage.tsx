@@ -107,6 +107,28 @@ type SavedDesignState = {
   savedAt: string;
 };
 
+type MarqueeBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type MarqueeDragState = {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+  moved: boolean;
+};
+
+type GroupDragState = {
+  startX: number;
+  startY: number;
+  layerStartPositions: Record<string, { x: number; y: number }>;
+};
+
 function readSavedDesign(): SavedDesignState | null {
   try {
     const raw = localStorage.getItem(SAVED_DESIGN_KEY);
@@ -129,20 +151,27 @@ function loadImageElement(src: string) {
 
 function canvasToBlob(canvas: HTMLCanvasElement) {
   return new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob) resolve(blob);
-      else reject(new Error("Không tạo được PNG từ canvas."));
-    }, "image/png", 1);
+    canvas.toBlob(
+      (blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error("Không tạo được PNG từ canvas."));
+      },
+      "image/png",
+      1,
+    );
   });
 }
-
 
 export default function DesignPage() {
   const captureRef = useRef<HTMLDivElement | null>(null);
   const pinchRef = useRef<PinchState | null>(null);
   const backgroundGestureRef = useRef<BackgroundGesture | null>(null);
   const layerDragRef = useRef(false);
-  const inlineEditorRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
+  const inlineEditorRefs = useRef<Record<string, HTMLTextAreaElement | null>>(
+    {},
+  );
+  const marqueeDragRef = useRef<MarqueeDragState | null>(null);
+  const groupDragRef = useRef<GroupDragState | null>(null);
 
   const [imageUrl, setImageUrl] = useState("");
   const [imageNaturalRatio, setImageNaturalRatio] = useState<number>(9 / 16);
@@ -169,13 +198,17 @@ export default function DesignPage() {
   const [mobileTextDraft, setMobileTextDraft] = useState("");
 
   const [freeEdit, setFreeEdit] = useState(false);
-  const [parentEditBaseBox, setParentEditBaseBox] = useState<BubbleBox | null>(null);
+  const [parentEditBaseBox, setParentEditBaseBox] = useState<BubbleBox | null>(
+    null,
+  );
   const [backgroundEditMode, setBackgroundEditMode] = useState(false);
   const [showLayerFrames, setShowLayerFrames] = useState(true);
   const [layers, setLayers] = useState<DesignLayer[]>(() =>
     createDefaultDesignLayers(loadContent(), "left-service-panel"),
   );
   const [selectedLayerId, setSelectedLayerId] = useState("brand");
+  const [selectedLayerIds, setSelectedLayerIds] = useState<string[]>(["brand"]);
+  const [marqueeBox, setMarqueeBox] = useState<MarqueeBox | null>(null);
   const [exportMode, setExportMode] = useState(false);
   const [pinchingLayerId, setPinchingLayerId] = useState<string | null>(null);
   const [editingLayerId, setEditingLayerId] = useState<string | null>(null);
@@ -223,7 +256,10 @@ export default function DesignPage() {
     setLayers(
       Array.isArray(saved.layers) && saved.layers.length > 0
         ? saved.layers
-        : createDefaultDesignLayers(saved.content ?? loadContent(), saved.templateId ?? "left-service-panel"),
+        : createDefaultDesignLayers(
+            saved.content ?? loadContent(),
+            saved.templateId ?? "left-service-panel",
+          ),
     );
     setSelectedLayerId(saved.selectedLayerId ?? "brand");
     setBubbleBox(saved.bubbleBox ?? activeTemplate.defaultBox);
@@ -231,6 +267,14 @@ export default function DesignPage() {
   }, []);
 
   const selectedLayer = layers.find((item) => item.id === selectedLayerId);
+  const editingLayer = layers.find((item) => item.id === editingLayerId);
+  const selectedGroupLayers = layers.filter((item) =>
+    selectedLayerIds.includes(item.id),
+  );
+  const selectedGroupBox =
+    selectedGroupLayers.length > 1
+      ? getLayersBoundingBox(selectedGroupLayers)
+      : null;
 
   // Base size của template cha. Khi resize/zoom template cha, toàn bộ nội dung
   // bên trong sẽ được scale theo base này để chữ, icon, padding và layout
@@ -243,7 +287,10 @@ export default function DesignPage() {
   const parentBubbleScaleY =
     bubbleBox.height / Math.max(parentBubbleBaseBox.height, 1);
   const parentBubbleMinWidth = 170;
-  const parentBubbleMinHeight = Math.max(120, Math.round(parentBubbleMinWidth / parentBubbleAspectRatio));
+  const parentBubbleMinHeight = Math.max(
+    120,
+    Math.round(parentBubbleMinWidth / parentBubbleAspectRatio),
+  );
 
   function readPixelValue(value: string) {
     const parsed = Number.parseFloat(value.replace("px", ""));
@@ -428,7 +475,9 @@ export default function DesignPage() {
     setLayers(nextLayers);
 
     const brandLayer = nextLayers.find((item) => item.id === "brand");
-    setSelectedLayerId(brandLayer?.id ?? nextLayers[0]?.id ?? "");
+    const nextSelectedId = brandLayer?.id ?? nextLayers[0]?.id ?? "";
+    setSelectedLayerId(nextSelectedId);
+    setSelectedLayerIds(nextSelectedId ? [nextSelectedId] : []);
 
     setFreeEdit(true);
     setBackgroundEditMode(false);
@@ -448,7 +497,9 @@ export default function DesignPage() {
       setLayers(nextLayers);
 
       const brandLayer = nextLayers.find((item) => item.id === "brand");
-      setSelectedLayerId(brandLayer?.id ?? nextLayers[0]?.id ?? "");
+      const nextSelectedId = brandLayer?.id ?? nextLayers[0]?.id ?? "";
+      setSelectedLayerId(nextSelectedId);
+      setSelectedLayerIds(nextSelectedId ? [nextSelectedId] : []);
 
       return;
     }
@@ -482,6 +533,7 @@ export default function DesignPage() {
     ]);
 
     setSelectedLayerId(id);
+    setSelectedLayerIds([id]);
     setFreeEdit(true);
     setBackgroundEditMode(false);
   }
@@ -508,6 +560,7 @@ export default function DesignPage() {
     ]);
 
     setSelectedLayerId(id);
+    setSelectedLayerIds([id]);
     setFreeEdit(true);
     setBackgroundEditMode(false);
   }
@@ -529,6 +582,7 @@ export default function DesignPage() {
     ]);
 
     setSelectedLayerId(id);
+    setSelectedLayerIds([id]);
   }
 
   function deleteLayer(id: string) {
@@ -538,7 +592,10 @@ export default function DesignPage() {
 
     setLayers((prev) => prev.filter((item) => item.id !== id));
 
-    if (fallback) setSelectedLayerId(fallback.id);
+    if (fallback) {
+      setSelectedLayerId(fallback.id);
+      setSelectedLayerIds([fallback.id]);
+    }
   }
 
   function bringForward(id: string) {
@@ -619,7 +676,7 @@ export default function DesignPage() {
   ) {
     if (backgroundEditMode) return;
 
-    setSelectedLayerId(layer.id);
+    selectSingleLayer(layer.id);
 
     if (event.touches.length !== 2) return;
 
@@ -750,14 +807,17 @@ export default function DesignPage() {
     setImageTransform({ x: 0, y: 0, scale: 1 });
   }
 
-
   function getLayersBoundingBox(sourceLayers = layers): BubbleBox {
     if (!sourceLayers.length) return activeTemplate.defaultBox;
 
     const minX = Math.min(...sourceLayers.map((layer) => layer.x));
     const minY = Math.min(...sourceLayers.map((layer) => layer.y));
-    const maxX = Math.max(...sourceLayers.map((layer) => layer.x + layer.width));
-    const maxY = Math.max(...sourceLayers.map((layer) => layer.y + layer.height));
+    const maxX = Math.max(
+      ...sourceLayers.map((layer) => layer.x + layer.width),
+    );
+    const maxY = Math.max(
+      ...sourceLayers.map((layer) => layer.y + layer.height),
+    );
 
     return {
       x: Math.round(minX),
@@ -813,6 +873,7 @@ export default function DesignPage() {
 
   function handleFreeEditModeChange(nextValue: boolean) {
     setEditingLayerId(null);
+    setMarqueeBox(null);
 
     if (nextValue) {
       commitParentBoxToLayers();
@@ -828,50 +889,73 @@ export default function DesignPage() {
     setBackgroundEditMode(false);
   }
 
-  function openMobileTextEditor() {
-    if (!selectedLayer) {
+  function openMobileTextEditor(layerId = selectedLayerId) {
+    const layer = layers.find((item) => item.id === layerId);
+
+    if (!layer) {
       alert("Bạn hãy chọn một element chữ trước.");
       return;
     }
 
-    if (selectedLayer.type === "box") {
+    if (layer.type === "box") {
       alert("Layer nền không có nội dung chữ để sửa.");
       return;
     }
 
-    if (selectedLayer.type === "service-list") {
-      setMobileTextDraft((selectedLayer.services ?? []).join("\n"));
+    setEditingLayerId(layer.id);
+    setSelectedLayerId(layer.id);
+
+    if (layer.type === "service-list") {
+      setMobileTextDraft((layer.services ?? []).join("\n"));
     } else {
-      setMobileTextDraft(selectedLayer.text ?? "");
+      setMobileTextDraft(layer.text ?? "");
     }
 
     setMobileTextEditorOpen(true);
 
-    setTimeout(() => {
+    requestAnimationFrame(() => {
       const textarea = document.getElementById("mobile-text-editor-textarea");
       textarea?.focus();
-    }, 120);
+    });
+  }
+
+  function closeMobileTextEditor() {
+    setMobileTextEditorOpen(false);
+    setEditingLayerId(null);
   }
 
   function applyMobileTextEdit() {
-    if (!selectedLayer) return;
+    if (!editingLayerId) return;
 
-    if (selectedLayer.type === "service-list") {
-      updateLayer({
-        ...selectedLayer,
-        services: mobileTextDraft
-          .split("\n")
-          .map((item) => item.trim())
-          .filter(Boolean),
-      });
-    } else {
-      updateLayer({
-        ...selectedLayer,
-        text: mobileTextDraft,
-      });
+    const targetLayer = layers.find((layer) => layer.id === editingLayerId);
+    if (targetLayer) {
+      syncContentFromLayerText(targetLayer, mobileTextDraft);
     }
 
-    setMobileTextEditorOpen(false);
+    setLayers((prev) =>
+      prev.map((layer) => {
+        if (layer.id !== editingLayerId) return layer;
+
+        if (layer.type === "service-list") {
+          return {
+            ...layer,
+            services: mobileTextDraft
+              .split("\n")
+              .map((item) => item.trim())
+              .filter(Boolean),
+          };
+        }
+
+        if (layer.type === "box") return layer;
+
+        return {
+          ...layer,
+          text: mobileTextDraft,
+        };
+      }),
+    );
+
+    closeMobileTextEditor();
   }
 
   function updateLayerText(layer: DesignLayer, value: string) {
@@ -882,6 +966,7 @@ export default function DesignPage() {
         ...layer,
         services: value.split("\n"),
       });
+      syncContentFromLayerText(layer, value);
       return;
     }
 
@@ -889,6 +974,7 @@ export default function DesignPage() {
       ...layer,
       text: value,
     });
+    syncContentFromLayerText(layer, value);
   }
 
   function getLayerTextValue(layer: DesignLayer) {
@@ -899,16 +985,231 @@ export default function DesignPage() {
     return layer.text ?? "";
   }
 
+  function cleanContactValue(value: string) {
+    return value
+      .replace(/^\s*(facebook|fb)\s*:\s*/i, "")
+      .replace(/^\s*(hotline|phone|sđt|sdt)\s*:\s*/i, "")
+      .replace(/^\s*(đc|địa chỉ|dia chi)\s*:\s*/i, "")
+      .replace(/^\s*☎\s*/, "")
+      .trim();
+  }
+
+  function syncContentFromLayerText(layer: DesignLayer, value: string) {
+    if (layer.type === "service-list") {
+      updateContent(
+        "services",
+        value
+          .split("\n")
+          .map((item) => item.trim())
+          .filter(Boolean),
+      );
+      return;
+    }
+
+    const cleanValue = cleanContactValue(value);
+
+    switch (layer.id) {
+      case "brand":
+        updateContent("brand", value);
+        break;
+      case "subtitle":
+        updateContent("subtitle", value);
+        break;
+      case "facebook":
+        updateContent("facebook", cleanValue);
+        break;
+      case "address":
+        updateContent("address", cleanValue);
+        break;
+      case "hotline":
+      case "phone-bottom":
+        updateContent("phone", cleanValue);
+        break;
+      default:
+        break;
+    }
+  }
+
+  function selectSingleLayer(layerId: string) {
+    setSelectedLayerId(layerId);
+    setSelectedLayerIds([layerId]);
+  }
+
+  function normalizeMarqueeBox(box: MarqueeDragState): MarqueeBox {
+    const x = Math.min(box.startX, box.currentX);
+    const y = Math.min(box.startY, box.currentY);
+
+    return {
+      x,
+      y,
+      width: Math.abs(box.currentX - box.startX),
+      height: Math.abs(box.currentY - box.startY),
+    };
+  }
+
+  function intersectsBox(layer: DesignLayer, box: MarqueeBox) {
+    const layerRight = layer.x + layer.width;
+    const layerBottom = layer.y + layer.height;
+    const boxRight = box.x + box.width;
+    const boxBottom = box.y + box.height;
+
+    return !(
+      layerRight < box.x ||
+      layer.x > boxRight ||
+      layerBottom < box.y ||
+      layer.y > boxBottom
+    );
+  }
+
+  function handleCanvasPointerDown(event: any) {
+    const target = event.target as HTMLElement;
+
+    // Khi đang sửa text, click ra vùng trống thì thoát editor.
+    // Nếu click vào layer khác, layer đó sẽ tự xử lý ở handleLayerPointerDown.
+    if (editingLayerId) {
+      const clickedEditor = target.closest(
+        ".inline-layer-text-editor,.inline-layer-edit-done",
+      );
+      const clickedLayer = target.closest("[data-design-layer]");
+
+      if (!clickedEditor && !clickedLayer) {
+        stopInlineTextEdit();
+        setSelectedLayerIds([]);
+        setSelectedLayerId("");
+      }
+
+      return;
+    }
+
+    if (
+      !freeEdit ||
+      backgroundEditMode ||
+      exportMode ||
+      event.pointerType !== "mouse" ||
+      event.button !== 0
+    ) {
+      return;
+    }
+
+    if (target.closest("[data-design-layer], [data-export-hidden='true']")) {
+      return;
+    }
+
+    const node = captureRef.current;
+    if (!node) return;
+
+    const rect = node.getBoundingClientRect();
+    const startX = event.clientX - rect.left;
+    const startY = event.clientY - rect.top;
+
+    marqueeDragRef.current = {
+      pointerId: event.pointerId,
+      startX,
+      startY,
+      currentX: startX,
+      currentY: startY,
+      moved: false,
+    };
+
+    setMarqueeBox({ x: startX, y: startY, width: 0, height: 0 });
+    setSelectedLayerIds([]);
+    setEditingLayerId(null);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  function handleCanvasPointerMove(event: any) {
+    const drag = marqueeDragRef.current;
+    const node = captureRef.current;
+    if (!drag || !node || drag.pointerId !== event.pointerId) return;
+
+    const rect = node.getBoundingClientRect();
+    drag.currentX = Math.max(
+      0,
+      Math.min(rect.width, event.clientX - rect.left),
+    );
+    drag.currentY = Math.max(
+      0,
+      Math.min(rect.height, event.clientY - rect.top),
+    );
+    drag.moved =
+      drag.moved ||
+      Math.hypot(drag.currentX - drag.startX, drag.currentY - drag.startY) > 5;
+
+    setMarqueeBox(normalizeMarqueeBox(drag));
+  }
+
+  function handleCanvasPointerUp(event: any) {
+    const drag = marqueeDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+
+    const finalBox = normalizeMarqueeBox(drag);
+    const nextSelectedIds = drag.moved
+      ? layers
+          .filter((layer) => intersectsBox(layer, finalBox))
+          .map((layer) => layer.id)
+      : [];
+
+    setSelectedLayerIds(nextSelectedIds);
+    setSelectedLayerId(nextSelectedIds[0] ?? "");
+    setMarqueeBox(null);
+    marqueeDragRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  }
+
+  function startGroupDrag(data: { x: number; y: number }) {
+    if (!selectedGroupBox) return;
+
+    const layerStartPositions = Object.fromEntries(
+      selectedGroupLayers.map((layer) => [
+        layer.id,
+        { x: layer.x, y: layer.y },
+      ]),
+    );
+
+    groupDragRef.current = {
+      startX: data.x,
+      startY: data.y,
+      layerStartPositions,
+    };
+  }
+
+  function moveSelectedGroup(data: { x: number; y: number }) {
+    const drag = groupDragRef.current;
+    if (!drag) return;
+
+    const dx = data.x - drag.startX;
+    const dy = data.y - drag.startY;
+    const selectedSet = new Set(selectedLayerIds);
+
+    setLayers((prev) =>
+      prev.map((layer) => {
+        if (!selectedSet.has(layer.id)) return layer;
+        const startPosition = drag.layerStartPositions[layer.id];
+        if (!startPosition) return layer;
+
+        return {
+          ...layer,
+          x: Math.round(startPosition.x + dx),
+          y: Math.round(startPosition.y + dy),
+        };
+      }),
+    );
+  }
+
+  function stopGroupDrag() {
+    groupDragRef.current = null;
+  }
+
   function startInlineTextEdit(layer: DesignLayer) {
     if (layer.type === "box") {
-      setSelectedLayerId(layer.id);
+      selectSingleLayer(layer.id);
       setEditingLayerId(null);
       return;
     }
 
     if (layerDragRef.current || backgroundEditMode || exportMode) return;
 
-    setSelectedLayerId(layer.id);
+    selectSingleLayer(layer.id);
     setEditingLayerId(layer.id);
 
     requestAnimationFrame(() => {
@@ -922,6 +1223,41 @@ export default function DesignPage() {
 
   function stopInlineTextEdit() {
     setEditingLayerId(null);
+  }
+
+  function handleLayerPointerDown(layer: DesignLayer) {
+    // CapCut-like behavior:
+    // - 1 click/tap: select layer only.
+    // - drag/press-hold: move layer with react-rnd.
+    // - double click/tap: edit text.
+    // - while editing one text layer, clicking another text layer switches editor to it.
+    if (editingLayerId && editingLayerId !== layer.id) {
+      if (layer.type === "box") {
+        stopInlineTextEdit();
+        selectSingleLayer(layer.id);
+        return;
+      }
+
+      startInlineTextEdit(layer);
+      return;
+    }
+
+    selectSingleLayer(layer.id);
+  }
+
+  function handleLayerDoubleClick(
+    event: React.MouseEvent<HTMLDivElement>,
+    layer: DesignLayer,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (layer.type === "box") {
+      selectSingleLayer(layer.id);
+      return;
+    }
+
+    startInlineTextEdit(layer);
   }
 
   function saveDesignToLocalStorage(showToast = true) {
@@ -948,7 +1284,8 @@ export default function DesignPage() {
 
     try {
       localStorage.setItem(SAVED_DESIGN_KEY, JSON.stringify(payload));
-      if (showToast) alert("Đã lưu bản chỉnh sửa gần nhất trên trình duyệt này.");
+      if (showToast)
+        alert("Đã lưu bản chỉnh sửa gần nhất trên trình duyệt này.");
       return true;
     } catch (error) {
       console.error("Save design failed:", error);
@@ -964,10 +1301,7 @@ export default function DesignPage() {
     const cssWidth = rect.width;
     const cssHeight = rect.height;
 
-    function hasExportFlagInsideCapture(
-      target: HTMLElement,
-      selector: string,
-    ) {
+    function hasExportFlagInsideCapture(target: HTMLElement, selector: string) {
       let current: HTMLElement | null = target;
 
       while (current && current !== node) {
@@ -1080,7 +1414,10 @@ export default function DesignPage() {
       await waitForImages(node);
 
       const currentWidth = node.getBoundingClientRect().width;
-      const pixelRatio = Math.min(4, Math.max(2, 2160 / Math.max(currentWidth, 1)));
+      const pixelRatio = Math.min(
+        4,
+        Math.max(2, 2160 / Math.max(currentWidth, 1)),
+      );
       const blob = await exportCompositedImage(node, pixelRatio);
 
       await downloadOrPreviewBlob(blob, "sam-bubble-studio-2k.png");
@@ -1139,6 +1476,10 @@ export default function DesignPage() {
     <div
       ref={captureRef}
       className="relative mx-auto w-full overflow-hidden shadow-2xl"
+      onPointerDownCapture={handleCanvasPointerDown}
+      onPointerMove={handleCanvasPointerMove}
+      onPointerUp={handleCanvasPointerUp}
+      onPointerCancel={handleCanvasPointerUp}
       style={{
         maxWidth: mobileCanvasFullscreen
           ? canvasAspectRatio >= 1
@@ -1208,10 +1549,13 @@ export default function DesignPage() {
         [...layers]
           .sort((a, b) => (a.zIndex ?? 1) - (b.zIndex ?? 1))
           .map((layer) => {
-            const selected = selectedLayerId === layer.id;
+            const selected = selectedLayerIds.includes(layer.id);
             const canEditText = layer.type !== "box";
             const isInlineEditing =
-              canEditText && selected && editingLayerId === layer.id && !exportMode;
+              canEditText &&
+              selected &&
+              editingLayerId === layer.id &&
+              !exportMode;
 
             return (
               <Rnd
@@ -1225,16 +1569,26 @@ export default function DesignPage() {
                   x: layer.x,
                   y: layer.y,
                 }}
-                onMouseDown={() => setSelectedLayerId(layer.id)}
-                onPointerDown={() => setSelectedLayerId(layer.id)}
-                onTouchStart={(event: any) => handleLayerTouchStart(event, layer)}
+                onMouseDown={() => handleLayerPointerDown(layer)}
+                onPointerDown={() => handleLayerPointerDown(layer)}
+                onDoubleClick={(event: React.MouseEvent<HTMLDivElement>) =>
+                  handleLayerDoubleClick(event, layer)
+                }
+                onTouchStart={(event: any) => {
+                  if (editingLayerId && editingLayerId !== layer.id) {
+                    handleLayerPointerDown(layer);
+                    return;
+                  }
+
+                  handleLayerTouchStart(event, layer);
+                }}
                 onTouchMove={(event: any) => handleLayerTouchMove(event, layer)}
                 onTouchEnd={handleLayerTouchEnd}
                 onTouchCancel={handleLayerTouchEnd}
                 onDragStart={() => {
                   layerDragRef.current = true;
                   setEditingLayerId(null);
-                  setSelectedLayerId(layer.id);
+                  selectSingleLayer(layer.id);
                 }}
                 onDrag={(_, data) =>
                   updateLayer({
@@ -1256,7 +1610,7 @@ export default function DesignPage() {
                 }}
                 onResizeStart={() => {
                   setEditingLayerId(null);
-                  setSelectedLayerId(layer.id);
+                  selectSingleLayer(layer.id);
                 }}
                 onResize={(_, __, ref, ___, position) => {
                   updateLayer({
@@ -1285,6 +1639,7 @@ export default function DesignPage() {
                   isInlineEditing
                 }
                 className="select-none"
+                data-design-layer="true"
                 style={{
                   zIndex: layer.zIndex ?? 1,
                   touchAction: isInlineEditing ? "auto" : "none",
@@ -1325,7 +1680,7 @@ export default function DesignPage() {
                     selected={selected}
                     exportMode={exportMode}
                     showFrame={showLayerFrames}
-                    onClick={() => startInlineTextEdit(layer)}
+                    onClick={() => handleLayerPointerDown(layer)}
                   />
                 )}
               </Rnd>
@@ -1403,11 +1758,15 @@ export default function DesignPage() {
           }
           resizeHandleStyles={getDashedResizeHandleStyles(!backgroundEditMode)}
         >
-          <div className="relative h-full w-full" style={{ pointerEvents: "none" }}>
+          <div
+            className="relative h-full w-full"
+            style={{ pointerEvents: "none" }}
+          >
             {[...layers]
               .sort((a, b) => (a.zIndex ?? 1) - (b.zIndex ?? 1))
               .map((layer) => {
-                const baseBox = parentEditBaseBox ?? getLayersBoundingBox(layers);
+                const baseBox =
+                  parentEditBaseBox ?? getLayersBoundingBox(layers);
                 const previewLayer = scaleLayerFromBaseBox(
                   layer,
                   baseBox,
@@ -1439,6 +1798,55 @@ export default function DesignPage() {
               })}
           </div>
         </Rnd>
+      )}
+
+      {freeEdit && selectedGroupBox && !exportMode && !editingLayerId && (
+        <Rnd
+          bounds="parent"
+          position={{ x: selectedGroupBox.x, y: selectedGroupBox.y }}
+          size={{
+            width: selectedGroupBox.width,
+            height: selectedGroupBox.height,
+          }}
+          enableResizing={false}
+          enableUserSelectHack={false}
+          onDragStart={(_, data) => startGroupDrag(data)}
+          onDrag={(_, data) => moveSelectedGroup(data)}
+          onDragStop={(_, data) => {
+            moveSelectedGroup(data);
+            stopGroupDrag();
+          }}
+          className="select-none"
+          data-export-hidden="true"
+          style={{
+            zIndex: 999,
+            touchAction: "none",
+            border: "2px dashed rgba(168,85,247,0.95)",
+            boxShadow: "0 0 0 3px rgba(168,85,247,0.22)",
+            background: "rgba(168,85,247,0.04)",
+            cursor: "move",
+          }}
+        >
+          <div className="pointer-events-none absolute -top-7 left-0 rounded-full bg-purple-500 px-2 py-1 text-[11px] font-black leading-none text-white shadow-lg">
+            Đã chọn {selectedLayerIds.length} element · kéo để di chuyển nhóm
+          </div>
+        </Rnd>
+      )}
+
+      {marqueeBox && !exportMode && (
+        <div
+          data-export-hidden="true"
+          className="pointer-events-none absolute z-[1000]"
+          style={{
+            left: marqueeBox.x,
+            top: marqueeBox.y,
+            width: marqueeBox.width,
+            height: marqueeBox.height,
+            border: "2px dashed rgba(14,165,233,0.95)",
+            background: "rgba(14,165,233,0.12)",
+            boxShadow: "0 0 0 1px rgba(255,255,255,0.85) inset",
+          }}
+        />
       )}
     </div>
   );
@@ -1552,7 +1960,7 @@ export default function DesignPage() {
                 layers={layers}
                 selectedLayerId={selectedLayerId}
                 selectedLayer={selectedLayer}
-                onSelectLayer={setSelectedLayerId}
+                onSelectLayer={selectSingleLayer}
                 onAddText={addTextLayer}
                 onAddBox={addBoxLayer}
                 onUpdateLayer={updateLayer}
@@ -1670,7 +2078,7 @@ export default function DesignPage() {
             </button>
 
             <button
-              onClick={openMobileTextEditor}
+              onClick={() => openMobileTextEditor()}
               className="shrink-0 rounded-xl bg-white/10 px-4 py-3 text-white"
             >
               Sửa chữ
@@ -1770,7 +2178,7 @@ export default function DesignPage() {
                 layers={layers}
                 selectedLayerId={selectedLayerId}
                 selectedLayer={selectedLayer}
-                onSelectLayer={setSelectedLayerId}
+                onSelectLayer={selectSingleLayer}
                 onAddText={addTextLayer}
                 onAddBox={addBoxLayer}
                 onUpdateLayer={updateLayer}
@@ -1794,12 +2202,12 @@ export default function DesignPage() {
               <div>
                 <p className="font-bold">Sửa nội dung</p>
                 <p className="text-xs text-zinc-500">
-                  {selectedLayer?.name ?? "Element đang chọn"}
+                  {editingLayer?.name ?? "Element đang sửa"}
                 </p>
               </div>
 
               <button
-                onClick={() => setMobileTextEditorOpen(false)}
+                onClick={closeMobileTextEditor}
                 className="rounded-xl bg-zinc-100 px-3 py-2 text-xs font-bold"
               >
                 Đóng
@@ -1810,6 +2218,7 @@ export default function DesignPage() {
               id="mobile-text-editor-textarea"
               value={mobileTextDraft}
               onChange={(event) => setMobileTextDraft(event.target.value)}
+              onBlur={applyMobileTextEdit}
               rows={8}
               className="w-full rounded-2xl border border-zinc-200 px-4 py-3 text-base outline-none focus:border-zinc-950"
               placeholder="Nhập nội dung..."
@@ -1915,7 +2324,6 @@ export default function DesignPage() {
   );
 }
 
-
 function InlineLayerTextEditor({
   layer,
   value,
@@ -1932,6 +2340,10 @@ function InlineLayerTextEditor({
   return (
     <div
       className="relative h-full w-full"
+      onMouseDown={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
+      onTouchStart={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
       style={{
         borderRadius: layer.borderRadius,
         outline: "2px dashed #38bdf8",
@@ -1942,9 +2354,7 @@ function InlineLayerTextEditor({
         overflow: "hidden",
       }}
     >
-      <div
-        className="pointer-events-none absolute left-0 top-[-24px] z-[99] max-w-full rounded-full bg-sky-400 px-2 py-1 text-[11px] font-black leading-none text-slate-950 shadow-lg"
-      >
+      <div className="pointer-events-none absolute left-0 top-[-24px] z-[99] max-w-full rounded-full bg-sky-400 px-2 py-1 text-[11px] font-black leading-none text-slate-950 shadow-lg">
         {layer.name}
       </div>
 
@@ -1953,6 +2363,7 @@ function InlineLayerTextEditor({
         className="inline-layer-text-editor h-full w-full resize-none border-0 bg-transparent outline-none"
         value={value}
         onChange={(event) => onChange(event.target.value)}
+        onMouseDown={(event) => event.stopPropagation()}
         onPointerDown={(event) => event.stopPropagation()}
         onTouchStart={(event) => event.stopPropagation()}
         onClick={(event) => {
@@ -1966,7 +2377,10 @@ function InlineLayerTextEditor({
           textAlign: layer.textAlign ?? "left",
           letterSpacing: layer.letterSpacing,
           lineHeight: layer.lineHeight ?? 1.2,
-          padding: layer.type === "service-list" ? layer.padding ?? 4 : `0 ${layer.padding ?? 4}px`,
+          padding:
+            layer.type === "service-list"
+              ? (layer.padding ?? 4)
+              : `0 ${layer.padding ?? 4}px`,
           fontFamily: "inherit",
           opacity: layer.opacity ?? 1,
           WebkitTextFillColor: layer.color ?? "inherit",
@@ -1979,6 +2393,7 @@ function InlineLayerTextEditor({
 
       <button
         type="button"
+        onMouseDown={(event) => event.stopPropagation()}
         onPointerDown={(event) => event.stopPropagation()}
         onTouchStart={(event) => event.stopPropagation()}
         onClick={(event) => {

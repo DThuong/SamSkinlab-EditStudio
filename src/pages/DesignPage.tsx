@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Rnd } from "react-rnd";
 import { toBlob } from "html-to-image";
 import { ImagePlus, Menu, Plus, Type, X } from "lucide-react";
+import BubbleRenderer from "../components/BubbleRenderer";
 import EditorControls from "../components/EditorControls";
 import TemplatePicker from "../components/TemplatePicker";
 import { bubbleTemplates } from "../data/bubbleTemplates";
@@ -37,9 +38,12 @@ type BubblePinchState = {
 type PinchState = {
   layerId: string;
   startDistance: number;
-  startWidth: number;
-  startHeight: number;
-  startFontSize?: number;
+  startLayer: DesignLayer;
+};
+
+type LayerResizeState = {
+  layerId: string;
+  startLayer: DesignLayer;
 };
 
 type ImageTransform = {
@@ -165,6 +169,7 @@ function canvasToBlob(canvas: HTMLCanvasElement) {
 export default function DesignPage() {
   const captureRef = useRef<HTMLDivElement | null>(null);
   const pinchRef = useRef<PinchState | null>(null);
+  const layerResizeRef = useRef<LayerResizeState | null>(null);
   const backgroundGestureRef = useRef<BackgroundGesture | null>(null);
   const layerDragRef = useRef(false);
   const inlineEditorRefs = useRef<Record<string, HTMLTextAreaElement | null>>(
@@ -686,9 +691,7 @@ export default function DesignPage() {
     pinchRef.current = {
       layerId: layer.id,
       startDistance: getTouchDistance(event.touches),
-      startWidth: layer.width,
-      startHeight: layer.height,
-      startFontSize: layer.fontSize,
+      startLayer: layer,
     };
 
     setPinchingLayerId(layer.id);
@@ -713,21 +716,16 @@ export default function DesignPage() {
     if (!currentDistance || !pinch.startDistance) return;
 
     const scale = currentDistance / pinch.startDistance;
+    const startLayer = pinch.startLayer;
 
-    const nextLayer: DesignLayer = {
-      ...layer,
-      width: Math.max(28, Math.round(pinch.startWidth * scale)),
-      height: Math.max(14, Math.round(pinch.startHeight * scale)),
-    };
-
-    if (layer.type !== "box" && pinch.startFontSize) {
-      nextLayer.fontSize = Math.max(
-        8,
-        Math.min(130, Math.round(pinch.startFontSize * scale)),
-      );
-    }
-
-    updateLayer(nextLayer);
+    updateLayer(
+      scaleLayerFromResize(
+        startLayer,
+        Math.max(28, Math.round(startLayer.width * scale)),
+        Math.max(14, Math.round(startLayer.height * scale)),
+        { x: startLayer.x, y: startLayer.y },
+      ),
+    );
   }
 
   function handleLayerTouchEnd(event: React.TouchEvent<HTMLDivElement>) {
@@ -856,6 +854,46 @@ export default function DesignPage() {
       borderRadius: layer.borderRadius
         ? Math.max(0, Math.round(layer.borderRadius * fontScale))
         : layer.borderRadius,
+    };
+  }
+
+  function scaleOptionalPixelValue(
+    value: number | undefined,
+    scale: number,
+    min = 0,
+  ) {
+    if (typeof value !== "number") return value;
+    return Math.max(min, Math.round(value * scale));
+  }
+
+  function scaleLayerFromResize(
+    startLayer: DesignLayer,
+    nextWidth: number,
+    nextHeight: number,
+    position: { x: number; y: number },
+  ): DesignLayer {
+    const scaleX = nextWidth / Math.max(startLayer.width, 1);
+    const scaleY = nextHeight / Math.max(startLayer.height, 1);
+    const contentScale = (scaleX + scaleY) / 2;
+
+    return {
+      ...startLayer,
+      x: Math.round(position.x),
+      y: Math.round(position.y),
+      width: Math.max(8, Math.round(nextWidth)),
+      height: Math.max(8, Math.round(nextHeight)),
+      fontSize: scaleOptionalPixelValue(startLayer.fontSize, contentScale, 6),
+      padding: scaleOptionalPixelValue(startLayer.padding, contentScale, 0),
+      borderRadius: scaleOptionalPixelValue(
+        startLayer.borderRadius,
+        contentScale,
+        0,
+      ),
+      borderWidth: scaleOptionalPixelValue(startLayer.borderWidth, contentScale, 0),
+      letterSpacing:
+        typeof startLayer.letterSpacing === "number"
+          ? Number((startLayer.letterSpacing * contentScale).toFixed(2))
+          : startLayer.letterSpacing,
     };
   }
 
@@ -1611,24 +1649,44 @@ export default function DesignPage() {
                 onResizeStart={() => {
                   setEditingLayerId(null);
                   selectSingleLayer(layer.id);
+                  layerResizeRef.current = {
+                    layerId: layer.id,
+                    startLayer: layer,
+                  };
                 }}
                 onResize={(_, __, ref, ___, position) => {
-                  updateLayer({
-                    ...layer,
-                    width: readPixelValue(ref.style.width),
-                    height: readPixelValue(ref.style.height),
-                    x: position.x,
-                    y: position.y,
-                  });
+                  const resizeState = layerResizeRef.current;
+                  const baseLayer =
+                    resizeState?.layerId === layer.id
+                      ? resizeState.startLayer
+                      : layer;
+
+                  updateLayer(
+                    scaleLayerFromResize(
+                      baseLayer,
+                      readPixelValue(ref.style.width),
+                      readPixelValue(ref.style.height),
+                      position,
+                    ),
+                  );
                 }}
                 onResizeStop={(_, __, ref, ___, position) => {
-                  updateLayer({
-                    ...layer,
-                    width: readPixelValue(ref.style.width),
-                    height: readPixelValue(ref.style.height),
-                    x: position.x,
-                    y: position.y,
-                  });
+                  const resizeState = layerResizeRef.current;
+                  const baseLayer =
+                    resizeState?.layerId === layer.id
+                      ? resizeState.startLayer
+                      : layer;
+
+                  updateLayer(
+                    scaleLayerFromResize(
+                      baseLayer,
+                      readPixelValue(ref.style.width),
+                      readPixelValue(ref.style.height),
+                      position,
+                    ),
+                  );
+
+                  layerResizeRef.current = null;
                 }}
                 minWidth={28}
                 minHeight={14}
